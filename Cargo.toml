@@ -1,0 +1,19 @@
+[package]
+name = "rex-git"
+version = "0.1.0"
+edition = "2024"
+description = "A git side pane for Rex: status, diffs, staging, commits drafted by Claude, and sync, with Axel integration."
+license = "MIT"
+repository = "https://github.com/owlnai/rex-git"
+readme = "README.md"
+keywords = ["git", "tui", "rex", "axel", "terminal"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+ratatui = "0.30"
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
