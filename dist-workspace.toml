@@ -19,5 +19,8 @@ hosting = "github"
 tap = "owlnai/homebrew-tap"
 # Publish jobs to run in CI
 publish-jobs = ["homebrew"]
+# The release workflow is edited by hand: the Homebrew formula is committed
+# as the owner, not as dist's default bot. Re-apply that after `dist generate`.
+allow-dirty = ["ci"]
 # Whether to install an updater program
 install-updater = false
