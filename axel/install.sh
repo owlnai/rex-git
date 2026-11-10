@@ -1,8 +1,10 @@
 #!/bin/sh
 # Install the Axel watcher, which opens a rex-git pane in every Axel thread
-# window. Copies axel-git.lua into Rex's config directory and, on macOS,
-# starts it now and at every login with a LaunchAgent.
+# window. Installs rex-git from the latest release if it's missing, copies
+# axel-git.lua into Rex's config directory and, on macOS, starts it now and
+# at every login with a LaunchAgent. Works from a clone or piped from curl:
 #
+#   curl -LsSf https://raw.githubusercontent.com/owlnai/rex-git/main/axel/install.sh | sh
 #   axel/install.sh               install, or update after a change
 #   axel/install.sh --uninstall   stop it and remove it
 set -eu
@@ -11,7 +13,8 @@ label=dev.rex-git.axel-watcher
 config="${XDG_CONFIG_HOME:-$HOME/.config}/rex"
 script="$config/axel-git.lua"
 plist="$HOME/Library/LaunchAgents/$label.plist"
-here=$(cd "$(dirname "$0")" && pwd)
+repo=https://github.com/owlnai/rex-git
+here=$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo .)
 
 if [ "${1:-}" = "--uninstall" ]; then
   if [ "$(uname)" = Darwin ]; then
@@ -24,11 +27,18 @@ if [ "${1:-}" = "--uninstall" ]; then
 fi
 
 rex_bin=$(command -v rex) || { echo "rex isn't on your PATH. Install Rex first." >&2; exit 1; }
-command -v rex-git >/dev/null || echo "Note: rex-git isn't on your PATH yet. Run: cargo install --path ." >&2
+if ! command -v rex-git >/dev/null && [ ! -x "$HOME/.cargo/bin/rex-git" ]; then
+  echo "Installing rex-git from the latest release..."
+  curl -LsSf "$repo/releases/latest/download/rex-git-installer.sh" | sh
+fi
 command -v axel >/dev/null || echo "Note: axel isn't on your PATH yet. See https://axel.md." >&2
 
 mkdir -p "$config"
-cp "$here/axel-git.lua" "$script"
+if [ -f "$here/axel-git.lua" ]; then
+  cp "$here/axel-git.lua" "$script"
+else
+  curl -LsSf "https://raw.githubusercontent.com/owlnai/rex-git/main/axel/axel-git.lua" -o "$script"
+fi
 
 if [ "$(uname)" != Darwin ]; then
   echo "Copied the watcher to $script. Keep it running with: rex do $script --all"
@@ -63,6 +73,12 @@ cat > "$plist" <<EOF
 EOF
 
 launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+# bootout returns before the old job is gone, and bootstrap fails until it is.
+i=0
+while launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 && [ $i -lt 50 ]; do
+  sleep 0.1
+  i=$((i + 1))
+done
 launchctl bootstrap "gui/$(id -u)" "$plist"
 echo "The Axel watcher is running and will start at login."
 echo "Log: ~/Library/Logs/rex-git-axel-watcher.log"

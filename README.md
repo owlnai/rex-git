@@ -17,11 +17,19 @@ and marks the files the thread's agents changed.
 
 ## Install
 
-You need [Rust](https://rustup.rs), git, and Rex.
+With Homebrew:
 
 ```sh
-cargo install --git https://github.com/owlnai/rex-git
+brew install owlnai/tap/rex-git
 ```
+
+Or with the installer, on macOS or Linux:
+
+```sh
+curl -LsSf https://github.com/owlnai/rex-git/releases/latest/download/rex-git-installer.sh | sh
+```
+
+Or from source, with [Rust](https://rustup.rs): `cargo install --git https://github.com/owlnai/rex-git`.
 
 Open it next to the pane you're in:
 
@@ -70,14 +78,13 @@ function they're in when git can tell.
   window. Install it once:
 
   ```sh
-  git clone https://github.com/owlnai/rex-git && cd rex-git
-  cargo install --path .
-  axel/install.sh
+  curl -LsSf https://raw.githubusercontent.com/owlnai/rex-git/main/axel/install.sh | sh
   ```
 
-  On macOS, `install.sh` starts it now and at every login with a LaunchAgent. Elsewhere,
-  keep `rex do ~/.config/rex/axel-git.lua --all` running. `axel/install.sh --uninstall`
-  removes it.
+  It installs rex-git too if it's missing. On macOS it starts the watcher now and at
+  every login with a LaunchAgent; elsewhere, keep
+  `rex do ~/.config/rex/axel-git.lua --all` running. Run it again with `--uninstall`
+  (`sh -s -- --uninstall` when piping) to remove it.
 
   I will try to add Linux and Windows support future, but right now I'm only using Mac.
   Feel free to experiment and submit a PR if you find a way!
