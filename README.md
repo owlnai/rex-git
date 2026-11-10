@@ -79,6 +79,9 @@ function they're in when git can tell.
   keep `rex do ~/.config/rex/axel-git.lua --all` running. `axel/install.sh --uninstall`
   removes it.
 
+  I will try to add Linux and Windows support future, but right now I'm only using Mac.
+  Feel free to experiment and submit a PR if you find a way!
+
 - **What the agents changed.** The header names the thread's agents, and files they
   changed are marked: `◆` in their latest turn that changed files, `◇` in an earlier one.
   `t` stages the latest turn's files. rex-git finds the thread working in its directory
