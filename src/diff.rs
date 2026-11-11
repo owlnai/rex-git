@@ -198,4 +198,34 @@ mod tests {
         let p = parse("diff --git a/x b/x\nBinary files a/x and b/x differ\n");
         assert!(matches!(&p.items[0], Item::Note(n) if n.starts_with("Binary")));
     }
+
+    #[test]
+    fn second_hunk_gets_a_gap() {
+        let p = parse("--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-a\n+b\n c\n@@ -10,2 +10,2 @@ fn x()\n d\n-e\n+f\n");
+        assert_eq!((p.adds, p.dels), (2, 2));
+        assert_eq!(p.items.len(), 7);
+        assert!(matches!(&p.items[3], Item::Gap { hidden: 7, context } if context == "fn x()"));
+        let Item::Line(first) = &p.items[0] else { panic!() };
+        assert_eq!((first.kind, first.num, first.emph), (Kind::Del, 1, None));
+    }
+
+    #[test]
+    fn no_newline_marker_is_a_note() {
+        let p = parse("@@ -1 +1 @@\n-a\n+b\n\\ No newline at end of file\n");
+        assert!(matches!(p.items.last(), Some(Item::Note(n)) if n == "No newline at end of file"));
+    }
+
+    #[test]
+    fn empty_diff_says_so() {
+        let p = parse("");
+        assert_eq!(p.items.len(), 1);
+        assert!(matches!(&p.items[0], Item::Note(n) if n == "no textual changes"));
+    }
+
+    #[test]
+    fn tabs_become_spaces() {
+        let p = parse("@@ -1 +1 @@\n+\tx\n");
+        let Item::Line(l) = &p.items[0] else { panic!() };
+        assert_eq!(l.text, "    x");
+    }
 }

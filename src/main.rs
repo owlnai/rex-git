@@ -9,6 +9,8 @@
 mod axel;
 mod diff;
 mod git;
+#[cfg(test)]
+mod testutil;
 
 use std::{
     collections::HashMap,
@@ -1840,4 +1842,84 @@ fn main() -> io::Result<()> {
     let _ = execute!(io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncation() {
+        assert_eq!(truncate_end("hello world", 5), "hell…");
+        assert_eq!(truncate_end("hi", 5), "hi");
+        assert_eq!(truncate_start("src/main.rs", 6), "…in.rs");
+        assert_eq!(truncate_start("a.rs", 6), "a.rs");
+    }
+
+    #[test]
+    fn ages_since() {
+        assert_eq!(ago(Duration::from_secs(30)), "just now");
+        assert_eq!(ago(Duration::from_secs(125)), "2m ago");
+        assert_eq!(ago(Duration::from_secs(7300)), "2h ago");
+    }
+
+    #[test]
+    fn hint_widths() {
+        assert_eq!(hints_width(&[("a", "bc"), ("d", "e")]), 9);
+        assert_eq!(hints_width(&[]), 0);
+    }
+
+    #[test]
+    fn hint_keys() {
+        assert_eq!(hint_key("spc"), Some(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+        assert_eq!(hint_key("⇧⏎"), Some(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)));
+        assert_eq!(hint_key("^E"), Some(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL)));
+        assert_eq!(hint_key("p"), Some(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)));
+        assert_eq!(hint_key("ab"), None);
+    }
+
+    fn rows(r: &[(bool, &str)]) -> Vec<(bool, String)> {
+        r.iter().map(|&(b, s)| (b, s.to_string())).collect()
+    }
+
+    #[test]
+    fn message_wrapping() {
+        assert_eq!(wrap_message("fix: a b", 80), rows(&[(true, "fix: a b")]));
+        assert_eq!(
+            wrap_message("subject\n\nbody text", 80),
+            rows(&[(true, "subject"), (false, ""), (false, "body text")])
+        );
+        assert_eq!(wrap_message("aaaa bbbb cccc", 9), rows(&[(true, "aaaa"), (true, "bbbb"), (true, "cccc")]));
+        assert_eq!(wrap_message("abcdefghijkl", 9), rows(&[(true, "abcdefgh"), (true, "ijkl")]));
+    }
+
+    #[test]
+    fn clipping() {
+        let spans = clip(vec!["abc".into(), "defgh".into()], 5);
+        let texts: Vec<&str> = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(texts, ["abc", "d…"]);
+    }
+
+    #[test]
+    fn diff_rows() {
+        let p = diff::parse("--- a/x\n+++ b/x\n@@ -10,3 +10,3 @@ fn main() {\n ctx\n-let a = 1;\n+let a = 2;\n ctx2\n");
+        assert_eq!(render_diff(&p, 40).len(), 5);
+        let p = diff::parse("@@ -1 +1 @@\n+0123456789012345678901234\n");
+        assert_eq!(render_diff(&p, 14).len(), 3);
+    }
+
+    #[test]
+    fn graph_row_text() {
+        let row = git::GraphRow {
+            lanes: "*".into(),
+            commit: Some(git::GraphCommit {
+                hash: "abc1234".into(),
+                refs: vec!["HEAD -> main".into(), "origin/HEAD".into()],
+                subject: "fix: thing".into(),
+                when: "2h".into(),
+            }),
+        };
+        let text: String = graph_line(&row, 60).spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "● abc1234 main fix: thing 2h");
+    }
 }

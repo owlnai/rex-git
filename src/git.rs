@@ -418,3 +418,138 @@ pub fn commit(dir: &Path, msg: &str) -> Result<String, String> {
     let sha = git(dir, &["rev-parse", "--short", "HEAD"]).unwrap_or_default();
     Ok(format!("committed {}", sha.trim()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::TempRepo;
+
+    #[test]
+    fn entries_by_section() {
+        let entries = parse_entries("M  a.rs\0 M b.rs\0MM c.rs\0?? d.rs\0R  new.rs\0old.rs\0".split('\0'));
+        let got: Vec<(Sec, char, &str)> = entries.iter().map(|e| (e.sec, e.code, e.path.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                (Sec::Staged, 'M', "a.rs"),
+                (Sec::Staged, 'M', "c.rs"),
+                (Sec::Staged, 'R', "new.rs"),
+                (Sec::Changed, 'M', "b.rs"),
+                (Sec::Changed, 'M', "c.rs"),
+                (Sec::Untracked, '?', "d.rs"),
+            ]
+        );
+    }
+
+    #[test]
+    fn ignored_and_short_records_are_skipped() {
+        assert!(parse_entries("!! target/x\0\0ab\0".split('\0')).is_empty());
+    }
+
+    fn head(h: &str) -> Repo {
+        let mut repo = Repo::default();
+        repo.parse_head(h, Path::new("."));
+        repo
+    }
+
+    #[test]
+    fn head_with_upstream_and_counts() {
+        let r = head("main...origin/main [ahead 1, behind 2]");
+        assert_eq!(r.branch, "main");
+        assert_eq!(r.upstream, Some("origin/main".into()));
+        assert_eq!((r.ahead, r.behind), (1, 2));
+    }
+
+    #[test]
+    fn head_without_upstream() {
+        let r = head("main");
+        assert_eq!(r.branch, "main");
+        assert_eq!(r.upstream, None);
+        assert_eq!((r.ahead, r.behind), (0, 0));
+    }
+
+    #[test]
+    fn head_before_the_first_commit() {
+        assert_eq!(head("No commits yet on main").branch, "main");
+    }
+
+    #[test]
+    fn head_with_a_gone_upstream() {
+        let r = head("main...origin/main [gone]");
+        assert_eq!(r.branch, "main");
+        assert_eq!(r.upstream, None);
+    }
+
+    #[test]
+    fn worktree_blocks() {
+        let wts = parse_worktrees(
+            "worktree /nonexistent/main\nHEAD abcdef1234567890\nbranch refs/heads/main\n\n\
+             worktree /nonexistent/wt\nHEAD 1234567890abcdef\ndetached\n\n\
+             worktree /nonexistent/repo.git\nbare\n\n",
+        );
+        assert_eq!(wts.len(), 3);
+        assert_eq!(wts[0].path, PathBuf::from("/nonexistent/main"));
+        assert_eq!(wts[0].branch, "main");
+        assert!(!wts[0].bare);
+        assert_eq!(wts[1].branch, "1234567");
+        assert!(wts[2].bare);
+    }
+
+    #[test]
+    fn graph_rows() {
+        let rows = parse_graph("* \x1fabc1234\x1fHEAD -> main, tag: v1\x1ffix: thing\x1f2 hours ago\n|\\  \n");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].lanes, "*");
+        let c = rows[0].commit.as_ref().unwrap();
+        assert_eq!(c.hash, "abc1234");
+        assert_eq!(c.refs, ["HEAD -> main", "tag: v1"]);
+        assert_eq!(c.subject, "fix: thing");
+        assert_eq!(c.when, "2h");
+        assert_eq!(rows[1].lanes, "|\\");
+        assert!(rows[1].commit.is_none());
+    }
+
+    #[test]
+    fn ages() {
+        assert_eq!(short_age("3 hours ago"), "3h");
+        assert_eq!(short_age("1 month ago"), "1mo");
+        assert_eq!(short_age("2 weeks ago"), "2w");
+        assert_eq!(short_age("5 minutes ago"), "5m");
+        assert_eq!(short_age("now"), "now");
+    }
+
+    #[test]
+    fn loads_a_real_repo() {
+        let t = TempRepo::new("loads-a-real-repo");
+        t.write("a.txt", "one\n");
+        t.write("b.txt", "one\n");
+        t.commit_all("base");
+        t.write("a.txt", "one\ntwo\n");
+        t.git(&["add", "a.txt"]);
+        t.write("b.txt", "changed\n");
+        t.write("c.txt", "x\ny\n");
+        let repo = Repo::load(&t.dir);
+
+        assert!(repo.is_repo);
+        assert_eq!(repo.branch, "main");
+        assert!(repo.upstream.is_none());
+        assert_eq!(repo.staged(), 1);
+        let got: Vec<(Sec, &str)> = repo.entries.iter().map(|e| (e.sec, e.path.as_str())).collect();
+        assert_eq!(got, [(Sec::Staged, "a.txt"), (Sec::Changed, "b.txt"), (Sec::Untracked, "c.txt")]);
+        assert_eq!(repo.counts[&(Sec::Staged, "a.txt".to_string())], (1, 0));
+        assert_eq!(repo.counts[&(Sec::Changed, "b.txt".to_string())], (1, 1));
+        assert_eq!(repo.counts[&(Sec::Untracked, "c.txt".to_string())], (2, 0));
+        assert_eq!(repo.commits.len(), 1);
+        assert_eq!(repo.commits[0].1, "base");
+    }
+
+    #[test]
+    fn not_a_repo() {
+        let dir = std::env::temp_dir().join(format!("rex-git-test-{}-not-a-repo", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let is_repo = Repo::load(&dir).is_repo;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!is_repo);
+    }
+}
