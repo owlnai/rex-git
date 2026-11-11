@@ -141,6 +141,10 @@ Press `?` inside for this list.
 
 rex-git works in any terminal, and in Rex it also:
 
+- **Follows your shell.** When a shell in the same Rex window `cd`s into another repo
+  or worktree, rex-git switches to it. It waits while you write a message, and stays put
+  when the shell leaves for a folder that isn't a repo. This needs a shell that reports
+  its directory, as fish does by default.
 - **Opens your editor beside it.** `o` and `Ctrl+E` open `$EDITOR` in a new pane next to
   the biggest pane in the window, instead of taking over rex-git's narrow one, and `O`
   opens it in a new tab. Drag the pane wherever you like; when the editor exits, it

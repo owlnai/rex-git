@@ -165,6 +165,10 @@ struct App {
     editing: Option<Instant>,
     /// This pane is zoomed to fill its Rex window, for a diff or the graph.
     zoomed: bool,
+    /// Where the window's other shells moved to, and the latest one, which
+    /// rex-git switches to once it isn't busy.
+    follow_rx: mpsc::Receiver<PathBuf>,
+    follow_to: Option<PathBuf>,
     /// The footer message, whether it's an error, and whether it stays until
     /// the next key or click instead of fading after `FLASH`.
     flash: Option<(String, bool, bool, Instant)>,
@@ -200,6 +204,7 @@ impl App {
         let (axel_tx, axel_rx) = mpsc::channel();
         let (axel_dir, dirs) = mpsc::channel();
         axel::watch(dir.clone(), thread, axel_tx, dirs);
+        let (_, follow_rx) = mpsc::channel();
         let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let repo = Repo::load(&dir);
         App {
@@ -223,6 +228,8 @@ impl App {
             edit: None,
             editing: None,
             zoomed: false,
+            follow_rx,
+            follow_to: None,
             flash: None,
             last_error: None,
             show_error: false,
@@ -245,6 +252,15 @@ impl App {
             diff_page: 20,
             quit: false,
         }
+    }
+
+    /// Follow the other shells in this pane's Rex window into the repos they
+    /// move to.
+    fn follow_window(&mut self) {
+        let Some(block) = rex::block() else { return };
+        let (tx, rx) = mpsc::channel();
+        rex::follow(block, tx);
+        self.follow_rx = rx;
     }
 
     fn refresh(&mut self) {
@@ -365,6 +381,14 @@ impl App {
         while let Ok(info) = self.axel_rx.try_recv() {
             self.axel = info;
         }
+        while let Ok(dir) = self.follow_rx.try_recv() {
+            self.follow_to = Some(dir);
+        }
+        // Not while a message is being written, so it isn't whisked away mid-word.
+        if self.follow_to.is_some() && !self.busy() && self.mode != Mode::Commit {
+            let dir = self.follow_to.take().unwrap_or_default();
+            self.follow(&dir);
+        }
         // The pane zooms for a diff or the graph, and goes back with them.
         if self.zoomed && !matches!(self.mode, Mode::Diff | Mode::Graph) {
             self.set_zoom(false);
@@ -412,9 +436,20 @@ impl App {
         self.zoomed = on;
     }
 
-    /// Whether something is running that a switch to another checkout would lose.
+    /// Whether something is running that a switch to another repo would lose.
     fn busy(&self) -> bool {
         self.syncing.is_some() || self.drafting.is_some() || self.editing.is_some()
+    }
+
+    /// A shell in this window moved to `dir`: show its repo, if it's in one.
+    fn follow(&mut self, dir: &Path) {
+        let Ok(root) = git(dir, &["rev-parse", "--show-toplevel"]) else { return };
+        let root = PathBuf::from(root.trim());
+        let root = root.canonicalize().unwrap_or(root);
+        if root != self.dir {
+            self.switch_dir(root);
+            self.flash(format!("following the shell to {}", self.name), false);
+        }
     }
 
     fn sync(&mut self, what: &'static str, quiet: bool) {
@@ -664,7 +699,7 @@ impl App {
         self.mode = Mode::Worktrees;
     }
 
-    /// Point everything at another checkout, keeping each one's message.
+    /// Switch to the checkout at `i` in the worktree list.
     fn switch_worktree(&mut self, i: usize) {
         let Some(path) = self.worktrees.as_ref().and_then(|v| v.items.get(i)).map(|(w, _)| w.path.clone()) else {
             return;
@@ -681,6 +716,11 @@ impl App {
             self.flash(format!("{} is gone; git worktree prune cleans it up", path.display()), true);
             return;
         }
+        self.switch_dir(path);
+    }
+
+    /// Point everything at another repo or checkout, keeping each one's message.
+    fn switch_dir(&mut self, path: PathBuf) {
         let old = std::mem::replace(&mut self.dir, path.clone());
         let msg = self.msgs.remove(&path).unwrap_or_default();
         self.msgs.insert(old, std::mem::replace(&mut self.msg, msg));
@@ -2118,6 +2158,7 @@ fn main() -> io::Result<()> {
     let root = git(&dir, &["rev-parse", "--show-toplevel"]).map(|s| PathBuf::from(s.trim())).unwrap_or(dir);
 
     let mut app = App::new(root, thread);
+    app.follow_window();
     let mut term = ratatui::init();
     execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     let result = run(&mut term, &mut app);

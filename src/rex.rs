@@ -1,10 +1,13 @@
-//! The Rex pane rex-git runs in: retitling it, zooming it, and opening an
-//! editor beside it or in a tab.
+//! The Rex pane rex-git runs in: retitling it, zooming it, opening an editor
+//! beside it or in a tab, and hearing where the other shells in its window go.
 
 use std::{
+    collections::HashMap,
     env,
-    path::Path,
+    io::{BufRead, BufReader},
+    path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::mpsc::Sender,
     thread,
 };
 
@@ -115,5 +118,119 @@ fn collect_panes(node: &Value, out: &mut Vec<(String, f64)>) {
     } else if node["split"].is_object() {
         collect_panes(&node["split"]["before"], out);
         collect_panes(&node["split"]["after"], out);
+    }
+}
+
+/// Send the directory each of the window's other shells moves to, as they
+/// report it. Stops when `rex events` ends or the receiver is gone.
+pub fn follow(block: String, tx: Sender<PathBuf>) {
+    thread::spawn(move || {
+        let Ok(mut child) = rex(&["events", "--json"]).stdout(Stdio::piped()).spawn() else { return };
+        let Some(out) = child.stdout.take() else { return };
+        // Where each shell is, so that reporting it again at a prompt isn't a move.
+        let mut at: HashMap<String, String> = window_blocks(&block)
+            .into_iter()
+            .filter(|b| *b != block)
+            .filter_map(|b| Some((b.clone(), pwd_of(&b)?)))
+            .collect();
+        for line in BufReader::new(out).lines() {
+            let Ok(line) = line else { break };
+            let Some((from, pwd)) = pwd_change(&line) else { continue };
+            if from == block || at.get(&from) == Some(&pwd) {
+                continue;
+            }
+            at.insert(from.clone(), pwd.clone());
+            if !window_blocks(&block).contains(&from) {
+                continue;
+            }
+            if let Some(path) = file_url_path(&pwd)
+                && tx.send(path).is_err()
+            {
+                break;
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    });
+}
+
+/// The block and directory of a `pwd_changed` event from `rex events --json`.
+fn pwd_change(line: &str) -> Option<(String, String)> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    let ev = &v["payload"]["event"];
+    if ev["type"] != "block_event" || ev["payload"]["name"] != "pwd_changed" {
+        return None;
+    }
+    let block = ev["payload"]["block_id"].as_str()?.to_string();
+    let pwd = ev["payload"]["payload"]["pwd"].as_str()?.to_string();
+    Some((block, pwd))
+}
+
+/// The blocks in `block`'s window now, itself included. Blocks move between
+/// windows, so this asks Rex every time.
+fn window_blocks(block: &str) -> Vec<String> {
+    let Ok(out) = rex(&["block", "ls", "--json"]).stdout(Stdio::piped()).output() else { return Vec::new() };
+    let Ok(v) = serde_json::from_slice::<Value>(&out.stdout) else { return Vec::new() };
+    let blocks = v["blocks"].as_array().cloned().unwrap_or_default();
+    let window = blocks.iter().find(|b| b["block_id"] == block).and_then(|b| b["window_id"].as_str());
+    let Some(window) = window else { return Vec::new() };
+    blocks
+        .iter()
+        .filter(|b| b["window_id"] == window)
+        .filter_map(|b| Some(b["block_id"].as_str()?.to_string()))
+        .collect()
+}
+
+/// The directory a terminal last reported, as a `file://` URL.
+fn pwd_of(block: &str) -> Option<String> {
+    let out = rex(&["block", "call", "-b", block, "pwd"]).stdout(Stdio::piped()).output().ok()?;
+    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
+    Some(v["pwd"].as_str()?.to_string())
+}
+
+/// The local path in a `file://host/path` URL, percent-decoded.
+fn file_url_path(url: &str) -> Option<PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    let path = &rest[rest.find('/')?..];
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(b)) => {
+                out.push(b);
+                i += 3;
+            }
+            (b, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    Some(PathBuf::from(String::from_utf8(out).ok()?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_urls() {
+        assert_eq!(file_url_path("file://mac.local/Users/me/src"), Some(PathBuf::from("/Users/me/src")));
+        assert_eq!(
+            file_url_path("file://mac.local/Users/me/Application%20Support"),
+            Some(PathBuf::from("/Users/me/Application Support"))
+        );
+        assert_eq!(file_url_path("file:///tmp"), Some(PathBuf::from("/tmp")));
+        assert_eq!(file_url_path("https://example.com/x"), None);
+    }
+
+    #[test]
+    fn pwd_events() {
+        let line = r#"{"type":"session_event","payload":{"session_id":"s","event":{"type":"block_event","payload":{"block_id":"block:1","creator_name":"com.superlogical.terminal","name":"pwd_changed","payload":{"pwd":"file://h/tmp","owner":{"pid":1,"name":"fish"}}}}}}"#;
+        assert_eq!(pwd_change(line), Some(("block:1".into(), "file://h/tmp".into())));
+        let other = line.replace("pwd_changed", "title_changed");
+        assert_eq!(pwd_change(&other), None);
     }
 }
