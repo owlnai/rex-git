@@ -27,8 +27,8 @@ use ratatui::{
     DefaultTerminal, Frame,
     crossterm::{
         event::{
-            self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-            MouseButton, MouseEvent, MouseEventKind,
+            self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode,
+            KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
         },
         execute,
         terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -671,6 +671,16 @@ impl App {
             KeyCode::Char(c) if !ctrl => self.msg.push(c),
             _ => {}
         }
+    }
+
+    /// Pasted text goes into the message as it is, so its newlines don't commit.
+    fn on_paste(&mut self, text: &str) {
+        if self.mode != Mode::Commit || self.drafting.is_some() || self.confirm_stage {
+            return;
+        }
+        self.dismiss_error();
+        self.msg.push_str(&text.replace("\r\n", "\n").replace('\r', "\n"));
+        self.msg_follow = true;
     }
 
     fn on_diff_key(&mut self, k: KeyEvent) {
@@ -1777,6 +1787,7 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
             match ev {
                 Event::Key(k) if k.kind == KeyEventKind::Press => app.on_key(k),
                 Event::Mouse(m) => app.on_mouse(m),
+                Event::Paste(text) => app.on_paste(&text),
                 _ => {}
             }
         }
@@ -1793,12 +1804,12 @@ fn edit_message(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     let path = env::temp_dir().join(format!("rex-git-{}.txt", std::process::id()));
     std::fs::write(&path, &app.msg)?;
     let editor = env::var("VISUAL").or_else(|_| env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
-    execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
+    execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen)?;
     disable_raw_mode()?;
     // Through sh, so an editor with arguments like `code -w` works.
     let status = Command::new("sh").args(["-c", &format!("{editor} \"$1\""), "sh"]).arg(&path).status();
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     term.clear()?;
     match status {
         Ok(s) if s.success() => {
@@ -1837,9 +1848,9 @@ fn main() -> io::Result<()> {
 
     let mut app = App::new(root, thread);
     let mut term = ratatui::init();
-    execute!(io::stdout(), EnableMouseCapture)?;
+    execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     let result = run(&mut term, &mut app);
-    let _ = execute!(io::stdout(), DisableMouseCapture);
+    let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
     ratatui::restore();
     result
 }
@@ -1847,6 +1858,7 @@ fn main() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::TempRepo;
 
     #[test]
     fn truncation() {
@@ -1921,5 +1933,29 @@ mod tests {
         };
         let text: String = graph_line(&row, 60).spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "● abc1234 main fix: thing 2h");
+    }
+
+    #[test]
+    fn paste_goes_into_the_message() {
+        let t = TempRepo::new("paste-goes-into-the-message");
+        t.write("a.txt", "one\n");
+        t.git(&["add", "a.txt"]);
+        let mut app = App::new(t.dir.clone(), None);
+        app.mode = Mode::Commit;
+        app.msg = "fix: ".into();
+        app.on_paste("thing\r\n\r\nbody one\rbody two");
+        assert_eq!(app.msg, "fix: thing\n\nbody one\nbody two");
+        // Nothing was committed: the file is still only staged.
+        assert_eq!(t.git(&["status", "--porcelain"]), "A  a.txt\n");
+        assert!(app.syncing.is_none());
+    }
+
+    #[test]
+    fn paste_outside_the_commit_box_is_ignored() {
+        let t = TempRepo::new("paste-outside-the-commit-box");
+        let mut app = App::new(t.dir.clone(), None);
+        app.on_paste("q");
+        assert_eq!(app.msg, "");
+        assert!(!app.quit);
     }
 }
