@@ -33,7 +33,7 @@ use ratatui::{
     layout::{Constraint, Layout, Margin, Rect},
     style::{Color, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, BorderType, Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
 };
 
 use crate::{
@@ -144,6 +144,9 @@ struct App {
     click_rows: Vec<(u16, usize)>,
     marker_x: u16,
     commit_rect: Rect,
+    sync_rect: Rect,
+    /// Footer hints on screen, as (row, from, to, key), so a click presses the key.
+    hint_hits: Vec<(u16, u16, u16, KeyEvent)>,
     diff_header_y: u16,
     diff_page: usize,
     quit: bool,
@@ -185,6 +188,8 @@ impl App {
             click_rows: Vec::new(),
             marker_x: 0,
             commit_rect: Rect::default(),
+            sync_rect: Rect::default(),
+            hint_hits: Vec::new(),
             diff_header_y: 0,
             diff_page: 20,
             quit: false,
@@ -238,7 +243,7 @@ impl App {
                 }
                 Job::Synced { what, quiet, result } => {
                     self.syncing = None;
-                    if what == "fetch" {
+                    if what == "fetch" || what == "sync" {
                         self.last_fetch = Some(Instant::now());
                     }
                     match result {
@@ -248,6 +253,7 @@ impl App {
                             self.mode = Mode::Files;
                             self.flash(text, false);
                         }
+                        Ok(text) if what == "sync" => self.flash(text, false),
                         Ok(_) if quiet => {}
                         Ok(_) => self.flash(format!("{what} done"), false),
                         Err(err) if quiet => self.flash(format!("fetch: {err}"), true),
@@ -303,6 +309,15 @@ impl App {
     fn sync(&mut self, what: &'static str, quiet: bool) {
         if self.syncing.is_some() {
             self.flash("busy, one moment", true);
+            return;
+        }
+        if what == "sync" {
+            self.syncing = Some((what, Instant::now()));
+            let (dir, tx) = (self.dir.clone(), self.tx.clone());
+            thread::spawn(move || {
+                let result = git::sync(&dir);
+                let _ = tx.send(Job::Synced { what, quiet, result });
+            });
             return;
         }
         let args: Vec<&'static str> = match what {
@@ -621,6 +636,18 @@ impl App {
     }
 
     fn on_mouse(&mut self, m: MouseEvent) {
+        if m.kind == MouseEventKind::Down(MouseButton::Left) {
+            let hit = self.hint_hits.iter().find(|(y, x0, x1, _)| m.row == *y && (*x0..*x1).contains(&m.column));
+            if let Some(&(.., key)) = hit {
+                self.on_key(key);
+                return;
+            }
+            let header = matches!(self.mode, Mode::Files | Mode::Commit);
+            if header && contains(self.sync_rect, m.column, m.row) {
+                self.sync("sync", false);
+                return;
+            }
+        }
         match (self.mode, m.kind) {
             (Mode::Diff, MouseEventKind::ScrollDown) => {
                 if let Some(d) = self.diff.as_mut() {
@@ -682,6 +709,8 @@ impl App {
     }
 
     fn draw(&mut self, f: &mut Frame) {
+        self.hint_hits.clear();
+        self.sync_rect = Rect::default();
         let area = f.area().inner(Margin { horizontal: 1, vertical: 0 });
         if !self.repo.is_repo {
             let text = vec![
@@ -704,7 +733,7 @@ impl App {
         let header_h = if self.axel.is_some() { 4 } else { 3 };
         if self.mode == Mode::Commit {
             // The message takes the file list's place while it's being written.
-            let [header, input, rule, footer] = Layout::vertical([
+            let [header, input, _, footer] = Layout::vertical([
                 Constraint::Length(header_h),
                 Constraint::Min(5),
                 Constraint::Length(1),
@@ -714,7 +743,6 @@ impl App {
             self.click_rows.clear();
             self.draw_header(f, header);
             self.draw_input(f, input);
-            f.render_widget(Line::from(gray("─".repeat(rule.width as usize))), rule);
             self.draw_footer(f, footer);
             return;
         }
@@ -723,7 +751,8 @@ impl App {
         } else {
             0
         };
-        let [header, list, recent, _, input, rule, footer] = Layout::vertical([
+        // A blank row on each side of the commit box.
+        let [header, list, recent, _, input, _, footer] = Layout::vertical([
             Constraint::Length(header_h),
             Constraint::Min(3),
             Constraint::Length(recent_h),
@@ -738,20 +767,22 @@ impl App {
         self.draw_list(f, list);
         self.draw_recent(f, recent);
         self.draw_input(f, input);
-        f.render_widget(Line::from(gray("─".repeat(rule.width as usize))), rule);
         self.draw_footer(f, footer);
         if self.mode == Mode::Help {
             self.draw_help(f, area);
         }
     }
 
-    fn draw_header(&self, f: &mut Frame, area: Rect) {
+    /// The repo and branch with the sync state (click it to sync), then the
+    /// upstream when it isn't the usual one and when it was last fetched.
+    fn draw_header(&mut self, f: &mut Frame, area: Rect) {
         let r = &self.repo;
         let mut sync: Vec<Span> = Vec::new();
         if let Some((what, since)) = self.syncing {
+            let what = if what == "sync" { "syncing" } else { what };
             sync.push(accent(format!("{} {what}", self.spinner(since))));
         } else if r.upstream.is_none() {
-            sync.push(accent("○ unpublished"));
+            sync.push(accent("↑ publish"));
         } else if r.ahead == 0 && r.behind == 0 {
             sync.push(gray("✓ synced"));
         } else {
@@ -769,19 +800,27 @@ impl App {
         let rows: [Rect; 3] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
         let sync_w: u16 = sync.iter().map(|s| s.width() as u16).sum();
         let [left, right] = Layout::horizontal([Constraint::Min(1), Constraint::Length(sync_w + 1)]).areas(rows[0]);
-        let branch = truncate_end(&r.branch, left.width.saturating_sub(2) as usize);
-        f.render_widget(Line::from(vec![gray("⎇ "), branch.bold()]), left);
+        let room = (left.width as usize).saturating_sub(self.name.chars().count() + 3);
+        let branch = truncate_end(&r.branch, room);
+        f.render_widget(Line::from(vec![self.name.clone().bold(), gray(" ⎇ "), accent(branch)]), left);
         f.render_widget(Line::from(sync).right_aligned(), right);
+        self.sync_rect = Rect { x: right.right().saturating_sub(sync_w), width: sync_w, ..right };
 
-        let mut line = vec![self.name.clone().into(), gray(" → ")];
+        let mut parts = Vec::new();
         match &r.upstream {
-            Some(up) => line.push(up.clone().into()),
-            None => line.push(gray("no upstream")),
+            None => parts.push("not published yet".to_string()),
+            Some(up) => {
+                if *up != format!("origin/{}", r.branch) {
+                    parts.push(format!("→ {up}"));
+                }
+                if let Some(t) = self.last_fetch {
+                    parts.push(format!("fetched {}", ago(t.elapsed())));
+                } else if parts.is_empty() {
+                    parts.push(format!("→ {up}"));
+                }
+            }
         }
-        if let Some(t) = self.last_fetch {
-            line.push(gray(format!(" · fetched {}", ago(t.elapsed()))));
-        }
-        f.render_widget(Line::from(clip(line, rows[1].width as usize)), rows[1]);
+        f.render_widget(Line::from(clip(vec![gray(parts.join(" · "))], rows[1].width as usize)), rows[1]);
 
         if let Some(info) = &self.axel {
             let n = r.entries.iter().filter(|e| self.touched(e).is_some()).count();
@@ -935,7 +974,10 @@ impl App {
     fn draw_input(&mut self, f: &mut Frame, area: Rect) {
         self.commit_rect = area;
         let active = self.mode == Mode::Commit;
-        let mut block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(GRAY));
+        let mut block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(GRAY))
+            .padding(Padding::horizontal(1));
         if active {
             let subject = self.msg.split('\n').next().unwrap_or("").chars().count();
             let color = match subject {
@@ -996,34 +1038,103 @@ impl App {
         f.render_widget(Paragraph::new(text), body);
     }
 
-    fn draw_footer(&self, f: &mut Frame, area: Rect) {
+    fn draw_footer(&mut self, f: &mut Frame, area: Rect) {
         // The question comes before any flash, so Enter never answers it unseen.
-        let line = if self.mode == Mode::Commit && self.confirm_stage {
+        if self.mode == Mode::Commit && self.confirm_stage {
             let all = format!("stage all {} & commit", self.unstaged_count());
-            let keys = hints(&[("⏎", &all), ("s", "pick"), ("esc", "cancel")], area.width as usize);
+            let keys = [("⏎", all.as_str()), ("s", "pick"), ("esc", "cancel")];
             // A narrow pane keeps the choices and drops the label.
-            if keys.width() + 17 > area.width as usize {
-                keys
+            let lead = if hints_width(&keys) + 16 > area.width as usize {
+                vec![]
             } else {
-                let mut spans = vec![fg("nothing staged", RED), gray(" · ")];
-                spans.extend(keys.spans);
-                Line::from(spans)
-            }
+                vec![fg("nothing staged", RED), "  ".into()]
+            };
+            self.put_hints(f, area, lead, &keys, None);
         } else if let Some(line) = self.flash_line(area.width as usize) {
-            line
+            f.render_widget(line, area);
         } else if self.mode == Mode::Commit {
             let keys = [("⏎", "commit"), ("⇧⏎", "line"), ("Tab", "draft"), ("^E", "editor"), ("esc", "back")];
-            hints(&keys, area.width as usize)
+            self.put_hints(f, area, vec![], &keys, None);
         } else {
-            let mut keys = vec![("spc", "stage"), ("⏎", "diff"), ("c", "commit"), ("Tab", "draft")];
-            if self.axel.is_some() {
-                keys.push(("t", "stage turn"));
+            let keys = self.file_hints();
+            self.put_hints(f, area, vec![], &keys, Some(("?", "keys")));
+        }
+    }
+
+    /// The file list's hints, most useful first for the state the repo is in.
+    fn file_hints(&self) -> Vec<(&'static str, &'static str)> {
+        let r = &self.repo;
+        let mut keys = Vec::new();
+        if let Some(e) = r.entries.get(self.sel) {
+            keys.push(("spc", if e.sec == Sec::Staged { "unstage" } else { "stage" }));
+        }
+        if r.staged() > 0 {
+            keys.push(("c", "commit"));
+        } else if !r.entries.is_empty() {
+            keys.push(("a", "stage all"));
+        }
+        if r.upstream.is_none() {
+            keys.push(("p", "publish"));
+        } else if r.behind > 0 {
+            keys.push(("P", "pull"));
+        } else if r.ahead > 0 {
+            keys.push(("p", "push"));
+        }
+        if !r.entries.is_empty() {
+            keys.push(("⏎", "diff"));
+            keys.push(("Tab", "draft"));
+        }
+        if self.axel.is_some() {
+            keys.push(("t", "stage turn"));
+        }
+        keys.push(("g", "graph"));
+        keys
+    }
+
+    /// Draw `lead`, then as many hints as fit, then `pinned` at the right edge,
+    /// and remember where each hint is so clicking it presses its key.
+    fn put_hints(
+        &mut self,
+        f: &mut Frame,
+        area: Rect,
+        lead: Vec<Span<'static>>,
+        keys: &[(&str, &str)],
+        pinned: Option<(&str, &str)>,
+    ) {
+        let width = area.width as usize;
+        let pin_w = pinned.map_or(0, |p| hints_width(&[p]) + 2);
+        let mut spans = lead;
+        let mut x: usize = spans.iter().map(|s| s.width()).sum();
+        let mut add = |spans: &mut Vec<Span<'static>>, x: &mut usize, (k, v): (&str, &str)| {
+            let w = k.chars().count() + 1 + v.chars().count();
+            if let Some(key) = hint_key(k) {
+                let x0 = area.x + *x as u16;
+                self.hint_hits.push((area.y, x0, x0 + w as u16, key));
             }
-            keys.push(("g", "graph"));
-            keys.push(("?", "keys"));
-            hints(&keys, area.width as usize)
+            spans.push(accent(format!("{k} ")));
+            spans.push(gray(v.to_string()));
+            *x += w;
         };
-        f.render_widget(line, area);
+        let mut first = true;
+        for &key in keys {
+            let gap = if first { 0 } else { 2 };
+            if x + gap + hints_width(&[key]) + pin_w > width {
+                break;
+            }
+            if !first {
+                spans.push("  ".into());
+                x += 2;
+            }
+            add(&mut spans, &mut x, key);
+            first = false;
+        }
+        if let Some(p) = pinned {
+            let pad = width.saturating_sub(x + hints_width(&[p]));
+            spans.push(" ".repeat(pad).into());
+            x += pad;
+            add(&mut spans, &mut x, p);
+        }
+        f.render_widget(Line::from(spans), area);
     }
 
     /// Files that `git add -A` would stage.
@@ -1052,6 +1163,7 @@ impl App {
             ("g", "commit graph"),
             ("p  P", "push / pull --ff-only"),
             ("f", "fetch (also every 3m)"),
+            ("click ✓", "sync: fetch, pull, push"),
             ("q", "quit"),
             ("", ""),
             ("◆  ◇", "changed in the last / an earlier turn"),
@@ -1120,13 +1232,13 @@ impl App {
         let visible: Vec<Line> = rows.iter().skip(d.scroll).take(body.height as usize).cloned().collect();
         f.render_widget(Paragraph::new(visible), body);
 
-        let line = flash.unwrap_or_else(|| {
-            hints(
-                &[("esc", "back"), ("s", "stage"), ("n", "next file"), ("e", "context")],
-                footer.width as usize,
-            )
-        });
-        f.render_widget(line, footer);
+        match flash {
+            Some(line) => f.render_widget(line, footer),
+            None => {
+                let keys = [("esc", "back"), ("s", "stage"), ("n", "next file"), ("e", "context")];
+                self.put_hints(f, footer, vec![], &keys, None);
+            }
+        }
     }
 
     fn draw_graph(&mut self, f: &mut Frame, area: Rect) {
@@ -1163,11 +1275,11 @@ impl App {
             .collect();
         f.render_widget(Paragraph::new(visible), body);
 
-        let line = flash.unwrap_or_else(|| {
-            let other = if g.all { "this branch" } else { "all branches" };
-            hints(&[("esc", "back"), ("a", other), ("r", "refresh")], footer.width as usize)
-        });
-        f.render_widget(line, footer);
+        let other = if g.all { "this branch" } else { "all branches" };
+        match flash {
+            Some(line) => f.render_widget(line, footer),
+            None => self.put_hints(f, footer, vec![], &[("esc", "back"), ("a", other), ("r", "refresh")], None),
+        }
     }
 }
 
@@ -1317,25 +1429,26 @@ fn wrap_message(msg: &str, width: usize) -> Vec<(bool, String)> {
     rows
 }
 
-fn hints(keys: &[(&str, &str)], width: usize) -> Line<'static> {
-    let mut spans = Vec::new();
-    let mut used = 0;
-    for (k, v) in keys {
-        let sep = if spans.is_empty() { 0 } else { 3 };
-        let w = sep + k.chars().count() + v.chars().count() + (!k.is_empty()) as usize;
-        if used + w > width {
-            break;
-        }
-        if sep > 0 {
-            spans.push(gray(" · "));
-        }
-        if !k.is_empty() {
-            spans.push(accent(format!("{k} ")));
-        }
-        spans.push(gray(v.to_string()));
-        used += w;
-    }
-    Line::from(spans)
+/// How wide hints are when laid out two spaces apart.
+fn hints_width(keys: &[(&str, &str)]) -> usize {
+    let w: usize = keys.iter().map(|(k, v)| k.chars().count() + 1 + v.chars().count()).sum();
+    w + 2 * keys.len().saturating_sub(1)
+}
+
+/// The key a hint's label stands for.
+fn hint_key(label: &str) -> Option<KeyEvent> {
+    let none = KeyModifiers::NONE;
+    let (code, mods) = match label {
+        "spc" => (KeyCode::Char(' '), none),
+        "⏎" => (KeyCode::Enter, none),
+        "⇧⏎" => (KeyCode::Enter, KeyModifiers::SHIFT),
+        "Tab" => (KeyCode::Tab, none),
+        "esc" => (KeyCode::Esc, none),
+        "^E" => (KeyCode::Char('e'), KeyModifiers::CONTROL),
+        k if k.chars().count() == 1 => (KeyCode::Char(k.chars().next()?), none),
+        _ => return None,
+    };
+    Some(KeyEvent::new(code, mods))
 }
 
 fn clip(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {

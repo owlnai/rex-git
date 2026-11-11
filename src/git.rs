@@ -209,6 +209,31 @@ pub fn diff_text(dir: &Path, e: &Entry, context: u32) -> String {
 /// Ask Claude for a commit message for the staged changes, or for all
 /// changes when nothing is staged. `start` is what the user has typed so far,
 /// to complete; `intent` is the Axel thread's goal, for the why.
+/// Bring the branch level with its upstream: publish it if it has none,
+/// otherwise fetch, pull (fast-forward only) what's new, and push what's ours.
+pub fn sync(dir: &Path) -> Result<String, String> {
+    if git(dir, &["rev-parse", "--abbrev-ref", "@{u}"]).is_err() {
+        git(dir, &["push", "--quiet", "-u", "origin", "HEAD"])?;
+        return Ok("published".into());
+    }
+    git(dir, &["fetch", "--quiet", "--prune"])?;
+    let count = |range: &str| {
+        git(dir, &["rev-list", "--count", range]).ok().and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(0)
+    };
+    let (behind, ahead) = (count("HEAD..@{u}"), count("@{u}..HEAD"));
+    let commits = |n: u32| if n == 1 { "1 commit".to_string() } else { format!("{n} commits") };
+    let mut done = Vec::new();
+    if behind > 0 {
+        git(dir, &["pull", "--ff-only", "--quiet"])?;
+        done.push(format!("pulled {}", commits(behind)));
+    }
+    if ahead > 0 {
+        git(dir, &["push", "--quiet"])?;
+        done.push(format!("pushed {}", commits(ahead)));
+    }
+    Ok(if done.is_empty() { "up to date".into() } else { done.join(", ") })
+}
+
 /// One row of `git log --graph`: the lane drawing, and the commit if the row
 /// has one (rows that only bend lanes don't).
 pub struct GraphRow {
