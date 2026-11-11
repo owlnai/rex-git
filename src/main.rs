@@ -3,7 +3,7 @@
 //! Shows the branch and its sync state, the changed files (marking the ones
 //! an Axel thread's agents changed), and recent commits. Click a file or
 //! press Enter for its diff, Space to stage it, `c` to write a commit message
-//! (`g`, or Tab while writing, asks Claude to draft or complete it), and
+//! (Tab asks Claude to draft or complete it), and
 //! `p`/`P`/`f` to push, pull and fetch.
 
 mod axel;
@@ -421,7 +421,7 @@ impl App {
             }
             KeyCode::Char('t') => self.stage_turn(),
             KeyCode::Char('c') | KeyCode::Char('i') => self.enter_commit(),
-            KeyCode::Char('g') | KeyCode::Tab => self.draft(),
+            KeyCode::Tab => self.draft(),
             KeyCode::Char('p') => self.sync("push", false),
             KeyCode::Char('P') => self.sync("pull", false),
             KeyCode::Char('f') => self.sync("fetch", false),
@@ -482,7 +482,6 @@ impl App {
             KeyCode::PageUp | KeyCode::Char('b') => d.scroll = d.scroll.saturating_sub(page),
             KeyCode::Home => d.scroll = 0,
             KeyCode::End | KeyCode::Char('G') => d.scroll = max,
-            KeyCode::Char('g') => self.draft(),
             KeyCode::Char('e') => {
                 self.context = (self.context + 1) % CONTEXTS.len();
                 self.open_diff(self.sel);
@@ -800,7 +799,7 @@ impl App {
             let what = if self.msg.is_empty() { "drafting with claude…" } else { "completing with claude…" };
             vec![Line::from(vec![accent(format!("{} ", self.spinner(since))), gray(what)])]
         } else if self.msg.is_empty() {
-            let hint = if active { "commit message · Tab drafts it" } else { "c to commit · g drafts a message" };
+            let hint = if active { "commit message · Tab drafts it" } else { "c to commit · Tab drafts a message" };
             let mut line = vec![prompt];
             if active {
                 line.push(accent("▏"));
@@ -844,7 +843,7 @@ impl App {
             }
             hints(&keys, area.width as usize)
         } else {
-            let mut keys = vec![("spc", "stage"), ("⏎", "diff"), ("c", "commit"), ("g", "draft")];
+            let mut keys = vec![("spc", "stage"), ("⏎", "diff"), ("c", "commit"), ("Tab", "draft")];
             if self.axel.is_some() {
                 keys.push(("t", "stage turn"));
             }
@@ -868,7 +867,7 @@ impl App {
             ("a  u", "stage all / unstage all"),
             ("t", "stage the agents' last turn"),
             ("c", "write the commit message"),
-            ("g  Tab", "draft or complete it with claude"),
+            ("Tab", "draft or complete it with claude"),
             ("p  P", "push / pull --ff-only"),
             ("f", "fetch (also every 3m)"),
             ("q", "quit"),
@@ -938,7 +937,7 @@ impl App {
 
         let line = flash.unwrap_or_else(|| {
             hints(
-                &[("esc", "back"), ("s", "stage"), ("n", "next file"), ("e", "context"), ("g", "draft")],
+                &[("esc", "back"), ("s", "stage"), ("n", "next file"), ("e", "context")],
                 footer.width as usize,
             )
         });
