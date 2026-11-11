@@ -131,7 +131,12 @@ struct App {
     msg_page: usize,
     /// Ctrl+E asked for $EDITOR, which the run loop opens.
     edit: bool,
-    flash: Option<(String, bool, Instant)>,
+    /// The footer message, whether it's an error, and whether it stays until
+    /// the next key or click instead of fading after `FLASH`.
+    flash: Option<(String, bool, bool, Instant)>,
+    /// The last error in full, which `!` shows.
+    last_error: Option<String>,
+    show_error: bool,
     drafting: Option<Instant>,
     syncing: Option<(&'static str, Instant)>,
     tx: mpsc::Sender<Job>,
@@ -177,6 +182,8 @@ impl App {
             msg_page: 8,
             edit: false,
             flash: None,
+            last_error: None,
+            show_error: false,
             drafting: None,
             syncing: None,
             tx,
@@ -208,10 +215,22 @@ impl App {
         self.last_refresh = Instant::now();
     }
 
+    /// Show a message; an error stays until the next key or click.
     fn flash(&mut self, text: impl Into<String>, err: bool) {
+        self.flash_for(text, err, err);
+    }
+
+    fn flash_for(&mut self, text: impl Into<String>, err: bool, sticky: bool) {
         let text = text.into();
-        let line = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
-        self.flash = Some((line.to_string(), err, Instant::now()));
+        // Git ends with advice, so an error leads with the line that says what failed.
+        let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+        let cause = |l: &&str| l.contains("fatal:") || l.contains("error:");
+        let line = if err { lines.clone().find(cause) } else { None };
+        let line = line.or_else(|| lines.next_back()).unwrap_or("");
+        self.flash = Some((line.to_string(), err, sticky, Instant::now()));
+        if err {
+            self.last_error = Some(text.trim().to_string());
+        }
     }
 
     /// Whether an agent on the thread changed this file: `Some(true)` in its
@@ -256,7 +275,8 @@ impl App {
                         Ok(text) if what == "sync" => self.flash(text, false),
                         Ok(_) if quiet => {}
                         Ok(_) => self.flash(format!("{what} done"), false),
-                        Err(err) if quiet => self.flash(format!("fetch: {err}"), true),
+                        // The background fetch fails quietly, as when offline.
+                        Err(err) if quiet => self.flash_for(format!("fetch: {err}"), true, false),
                         Err(err) => self.flash(err, true),
                     }
                     self.refresh();
@@ -273,7 +293,7 @@ impl App {
         if fetch_due && self.syncing.is_none() && self.repo.upstream.is_some() {
             self.sync("fetch", true);
         }
-        if self.flash.as_ref().is_some_and(|f| f.2.elapsed() >= FLASH) {
+        if self.flash.as_ref().is_some_and(|f| !f.2 && f.3.elapsed() >= FLASH) {
             self.flash = None;
         }
         self.update_title();
@@ -445,12 +465,28 @@ impl App {
             self.quit = true;
             return;
         }
+        self.dismiss_error();
+        if self.show_error {
+            self.show_error = false;
+            return;
+        }
+        if k.code == KeyCode::Char('!') && self.mode != Mode::Commit && self.last_error.is_some() {
+            self.show_error = true;
+            return;
+        }
         match self.mode {
             Mode::Help => self.mode = Mode::Files,
             Mode::Commit => self.on_commit_key(k),
             Mode::Diff => self.on_diff_key(k),
             Mode::Graph => self.on_graph_key(k),
             Mode::Files => self.on_files_key(k),
+        }
+    }
+
+    /// An error stays on screen until the next key or click, which still acts.
+    fn dismiss_error(&mut self) {
+        if self.flash.as_ref().is_some_and(|f| f.2) {
+            self.flash = None;
         }
     }
 
@@ -636,6 +672,13 @@ impl App {
     }
 
     fn on_mouse(&mut self, m: MouseEvent) {
+        if let MouseEventKind::Down(_) = m.kind {
+            self.dismiss_error();
+            if self.show_error {
+                self.show_error = false;
+                return;
+            }
+        }
         if m.kind == MouseEventKind::Down(MouseButton::Left) {
             let hit = self.hint_hits.iter().find(|(y, x0, x1, _)| m.row == *y && (*x0..*x1).contains(&m.column));
             if let Some(&(.., key)) = hit {
@@ -721,12 +764,15 @@ impl App {
             f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), area);
             return;
         }
-        if self.mode == Mode::Diff {
-            self.draw_diff(f, area);
-            return;
-        }
-        if self.mode == Mode::Graph {
-            self.draw_graph(f, area);
+        if matches!(self.mode, Mode::Diff | Mode::Graph) {
+            if self.mode == Mode::Diff {
+                self.draw_diff(f, area);
+            } else {
+                self.draw_graph(f, area);
+            }
+            if self.show_error {
+                self.draw_error(f, area);
+            }
             return;
         }
 
@@ -751,14 +797,13 @@ impl App {
         } else {
             0
         };
-        // A blank row on each side of the commit box.
-        let [header, list, recent, _, input, _, footer] = Layout::vertical([
+        // A blank row above the commit box; the keys sit right under it.
+        let [header, list, recent, _, input, footer] = Layout::vertical([
             Constraint::Length(header_h),
             Constraint::Min(3),
             Constraint::Length(recent_h),
             Constraint::Length(1),
             Constraint::Length(3),
-            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .areas(area);
@@ -770,6 +815,9 @@ impl App {
         self.draw_footer(f, footer);
         if self.mode == Mode::Help {
             self.draw_help(f, area);
+        }
+        if self.show_error {
+            self.draw_error(f, area);
         }
     }
 
@@ -1145,9 +1193,35 @@ impl App {
     }
 
     fn flash_line(&self, width: usize) -> Option<Line<'static>> {
-        let (text, err, _) = self.flash.as_ref()?;
-        let text = truncate_end(text, width);
-        Some(Line::from(if *err { fg(text, RED) } else { fg(text, GREEN) }))
+        let (text, err, ..) = self.flash.as_ref()?;
+        if !*err {
+            return Some(Line::from(fg(truncate_end(text, width), GREEN)));
+        }
+        // Point at the rest when the line shows only part of the error.
+        let more = "  ! more";
+        let cut = text.chars().count() > width || self.last_error.as_deref() != Some(text.as_str());
+        if !cut || width < 24 {
+            return Some(Line::from(fg(truncate_end(text, width), RED)));
+        }
+        let room = width - more.chars().count();
+        Some(Line::from(vec![fg(truncate_end(text, room), RED), accent("  !"), gray(" more")]))
+    }
+
+    /// The last error in full, over whatever is on screen.
+    fn draw_error(&self, f: &mut Frame, area: Rect) {
+        let Some(text) = self.last_error.as_deref() else { return };
+        let width = area.width.saturating_sub(4).max(1) as usize;
+        let mut lines = vec![Line::from(fg("last error", RED).bold())];
+        lines.extend(text.lines().map(|l| Line::from(l.to_string())));
+        lines.push(Line::raw(""));
+        lines.push(Line::from(gray("any key to close")));
+        // Count wrapped rows so the box fits the text.
+        let rows: usize = lines.iter().map(|l| l.width().max(1).div_ceil(width)).sum();
+        let h = (rows as u16 + 2).min(area.height);
+        let rect = Rect { x: area.x, y: area.y + area.height.saturating_sub(h) / 2, width: area.width, height: h };
+        f.render_widget(Clear, rect);
+        let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(RED)).padding(Padding::horizontal(1));
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);
     }
 
     fn draw_help(&self, f: &mut Frame, area: Rect) {
@@ -1164,6 +1238,7 @@ impl App {
             ("p  P", "push / pull --ff-only"),
             ("f", "fetch (also every 3m)"),
             ("click ✓", "sync: fetch, pull, push"),
+            ("!", "the last error in full"),
             ("q", "quit"),
             ("", ""),
             ("◆  ◇", "changed in the last / an earlier turn"),
