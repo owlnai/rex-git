@@ -58,8 +58,11 @@ key.
 | `q` | Quit |
 
 In the commit box, `Enter` commits, `Shift+Enter` adds a line, and `Tab` asks Claude to
-draft the message, or to finish the one you started, keeping your words. In a diff, `n`
-and `N` move between files, `s` stages, `e` shows more context, and `Esc` goes back.
+draft the message, or to finish the one you started, keeping your words. With nothing
+staged, `Enter` asks first: `Enter` again stages everything and commits, `s` goes back
+to pick files.
+
+In a diff, `n` and `N` move between files, `s` stages, `e` shows more context, and `Esc` goes back.
 
 ## Diffs
 
