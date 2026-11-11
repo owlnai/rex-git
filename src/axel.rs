@@ -6,7 +6,7 @@ use std::{
     env,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::mpsc::Sender,
+    sync::mpsc::{Receiver, RecvTimeoutError, Sender},
     thread,
     time::Duration,
 };
@@ -114,7 +114,8 @@ fn edited_turns(thread_id: &str) -> Option<Vec<(String, i64)>> {
 }
 
 /// Watch Axel in the background and send what it knows whenever it changes.
-pub fn watch(dir: PathBuf, wanted: Option<String>, tx: Sender<Option<Info>>) {
+/// A dir sent on `dirs` (a switch to another worktree) moves the watch there.
+pub fn watch(mut dir: PathBuf, mut wanted: Option<String>, tx: Sender<Option<Info>>, dirs: Receiver<PathBuf>) {
     thread::spawn(move || {
         let mut cache: HashMap<(String, i64), String> = HashMap::new();
         let mut last_sent: Option<(String, String, String)> = None;
@@ -154,7 +155,14 @@ pub fn watch(dir: PathBuf, wanted: Option<String>, tx: Sender<Option<Info>>) {
                     return;
                 }
             }
-            thread::sleep(POLL);
+            match dirs.recv_timeout(POLL) {
+                Ok(next) => {
+                    // The thread named at startup worked in the first dir only.
+                    (dir, wanted, last_sent) = (next, None, None);
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
         }
     });
 }

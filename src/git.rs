@@ -199,6 +199,11 @@ impl Worktree {
     }
 }
 
+/// How many files a checkout has changed, or None when it can't be read.
+pub fn changed_count(dir: &Path) -> Option<usize> {
+    git(dir, &["status", "--porcelain"]).ok().map(|s| s.lines().count())
+}
+
 /// The repo's checkouts as `git worktree list` gives them, the main one first.
 pub fn worktrees(dir: &Path) -> Vec<Worktree> {
     let Ok(out) = git(dir, &["worktree", "list", "--porcelain"]) else { return Vec::new() };

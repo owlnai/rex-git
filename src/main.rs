@@ -11,6 +11,7 @@ mod diff;
 mod git;
 
 use std::{
+    collections::HashMap,
     env,
     io::{self, Write},
     path::PathBuf,
@@ -83,6 +84,7 @@ enum Mode {
     Diff,
     Commit,
     Graph,
+    Worktrees,
     Help,
 }
 
@@ -105,6 +107,12 @@ struct GraphView {
     scroll: usize,
 }
 
+struct WorktreeView {
+    /// Each checkout with how many files it has changed.
+    items: Vec<(git::Worktree, Option<usize>)>,
+    sel: usize,
+}
+
 enum Row {
     Head(Sec, usize),
     Item(usize),
@@ -121,8 +129,11 @@ struct App {
     mode: Mode,
     diff: Option<DiffView>,
     graph: Option<GraphView>,
+    worktrees: Option<WorktreeView>,
     context: usize,
     msg: String,
+    /// Messages being written in the other worktrees, kept across switches.
+    msgs: HashMap<PathBuf, String>,
     /// Enter was pressed with nothing staged: ask whether to stage everything.
     confirm_stage: bool,
     /// The message box's first visible row, and whether it follows the cursor.
@@ -142,6 +153,7 @@ struct App {
     tx: mpsc::Sender<Job>,
     rx: mpsc::Receiver<Job>,
     axel_rx: mpsc::Receiver<Option<axel::Info>>,
+    axel_dir: mpsc::Sender<PathBuf>,
     last_refresh: Instant,
     last_fetch: Option<Instant>,
     /// The last fetch that worked, which the header shows.
@@ -163,7 +175,8 @@ impl App {
     fn new(dir: PathBuf, thread: Option<String>) -> App {
         let (tx, rx) = mpsc::channel();
         let (axel_tx, axel_rx) = mpsc::channel();
-        axel::watch(dir.clone(), thread, axel_tx);
+        let (axel_dir, dirs) = mpsc::channel();
+        axel::watch(dir.clone(), thread, axel_tx, dirs);
         let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let repo = Repo::load(&dir);
         App {
@@ -176,8 +189,10 @@ impl App {
             mode: Mode::Files,
             diff: None,
             graph: None,
+            worktrees: None,
             context: 0,
             msg: String::new(),
+            msgs: HashMap::new(),
             confirm_stage: false,
             msg_scroll: 0,
             msg_follow: true,
@@ -191,6 +206,7 @@ impl App {
             tx,
             rx,
             axel_rx,
+            axel_dir,
             last_refresh: Instant::now(),
             last_fetch: None,
             fetched: None,
@@ -464,6 +480,56 @@ impl App {
         }
     }
 
+    fn open_worktrees(&mut self) {
+        let items: Vec<_> = git::worktrees(&self.dir)
+            .into_iter()
+            .filter(|w| !w.bare)
+            .map(|w| {
+                let changed = git::changed_count(&w.path);
+                (w, changed)
+            })
+            .collect();
+        if items.len() < 2 {
+            self.flash("no other worktrees; git worktree add makes one", false);
+            return;
+        }
+        let sel = items.iter().position(|(w, _)| w.path == self.dir).unwrap_or(0);
+        self.worktrees = Some(WorktreeView { items, sel });
+        self.mode = Mode::Worktrees;
+    }
+
+    /// Point everything at another checkout, keeping each one's message.
+    fn switch_worktree(&mut self, i: usize) {
+        let Some(path) = self.worktrees.as_ref().and_then(|v| v.items.get(i)).map(|(w, _)| w.path.clone()) else {
+            return;
+        };
+        if path == self.dir {
+            self.mode = Mode::Files;
+            return;
+        }
+        if self.syncing.is_some() || self.drafting.is_some() {
+            self.flash("busy, one moment", true);
+            return;
+        }
+        if !path.is_dir() {
+            self.flash(format!("{} is gone; git worktree prune cleans it up", path.display()), true);
+            return;
+        }
+        let old = std::mem::replace(&mut self.dir, path.clone());
+        let msg = self.msgs.remove(&path).unwrap_or_default();
+        self.msgs.insert(old, std::mem::replace(&mut self.msg, msg));
+        self.name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.repo = Repo::load(&path);
+        self.axel = None;
+        let _ = self.axel_dir.send(path);
+        (self.sel, self.scroll) = (0, 0);
+        (self.diff, self.graph, self.worktrees) = (None, None, None);
+        (self.msg_scroll, self.msg_follow, self.confirm_stage) = (0, true, false);
+        (self.last_fetch, self.fetched) = (None, None);
+        self.mode = Mode::Files;
+        self.last_refresh = Instant::now();
+    }
+
     // ------------------------------------------------------------ input
 
     fn on_key(&mut self, k: KeyEvent) {
@@ -485,6 +551,7 @@ impl App {
             Mode::Commit => self.on_commit_key(k),
             Mode::Diff => self.on_diff_key(k),
             Mode::Graph => self.on_graph_key(k),
+            Mode::Worktrees => self.on_worktrees_key(k),
             Mode::Files => self.on_files_key(k),
         }
     }
@@ -523,6 +590,7 @@ impl App {
             KeyCode::Char('c') | KeyCode::Char('i') => self.enter_commit(),
             KeyCode::Tab => self.draft(),
             KeyCode::Char('g') => self.open_graph(false),
+            KeyCode::Char('w') => self.open_worktrees(),
             KeyCode::Char('p') => self.sync("push", false),
             KeyCode::Char('P') => self.sync("pull", false),
             KeyCode::Char('f') => self.sync("fetch", false),
@@ -644,6 +712,29 @@ impl App {
         }
     }
 
+    fn on_worktrees_key(&mut self, k: KeyEvent) {
+        let Some(v) = self.worktrees.as_mut() else {
+            self.mode = Mode::Files;
+            return;
+        };
+        let max = v.items.len().saturating_sub(1);
+        match k.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('w') | KeyCode::Left | KeyCode::Char('h') => {
+                self.mode = Mode::Files
+            }
+            KeyCode::Down | KeyCode::Char('j') => v.sel = (v.sel + 1).min(max),
+            KeyCode::Up | KeyCode::Char('k') => v.sel = v.sel.saturating_sub(1),
+            KeyCode::Home => v.sel = 0,
+            KeyCode::End | KeyCode::Char('G') => v.sel = max,
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                let i = v.sel;
+                self.switch_worktree(i);
+            }
+            KeyCode::Char('r') => self.open_worktrees(),
+            _ => {}
+        }
+    }
+
     fn on_graph_key(&mut self, k: KeyEvent) {
         let page = self.diff_page.max(1);
         let Some(g) = self.graph.as_mut() else {
@@ -708,8 +799,25 @@ impl App {
                     d.scroll = d.scroll.saturating_sub(3);
                 }
             }
-            (Mode::Diff | Mode::Graph, MouseEventKind::Down(MouseButton::Left)) if m.row == self.diff_header_y => {
+            (Mode::Diff | Mode::Graph | Mode::Worktrees, MouseEventKind::Down(MouseButton::Left))
+                if m.row == self.diff_header_y =>
+            {
                 self.mode = Mode::Files;
+            }
+            (Mode::Worktrees, MouseEventKind::Down(MouseButton::Left)) => {
+                if let Some(&(_, i)) = self.click_rows.iter().find(|(y, _)| *y == m.row) {
+                    self.switch_worktree(i);
+                }
+            }
+            (Mode::Worktrees, MouseEventKind::ScrollDown) => {
+                if let Some(v) = self.worktrees.as_mut() {
+                    v.sel = (v.sel + 1).min(v.items.len().saturating_sub(1));
+                }
+            }
+            (Mode::Worktrees, MouseEventKind::ScrollUp) => {
+                if let Some(v) = self.worktrees.as_mut() {
+                    v.sel = v.sel.saturating_sub(1);
+                }
             }
             (Mode::Graph, MouseEventKind::ScrollDown) => {
                 if let Some(g) = self.graph.as_mut() {
@@ -769,11 +877,11 @@ impl App {
             f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), area);
             return;
         }
-        if matches!(self.mode, Mode::Diff | Mode::Graph) {
-            if self.mode == Mode::Diff {
-                self.draw_diff(f, area);
-            } else {
-                self.draw_graph(f, area);
+        if matches!(self.mode, Mode::Diff | Mode::Graph | Mode::Worktrees) {
+            match self.mode {
+                Mode::Diff => self.draw_diff(f, area),
+                Mode::Graph => self.draw_graph(f, area),
+                _ => self.draw_worktrees(f, area),
             }
             if self.show_error {
                 self.draw_error(f, area);
@@ -1151,6 +1259,9 @@ impl App {
             keys.push(("t", "stage turn"));
         }
         keys.push(("g", "graph"));
+        if r.worktrees.iter().filter(|w| !w.bare).count() > 1 {
+            keys.push(("w", "worktrees"));
+        }
         keys
     }
 
@@ -1250,6 +1361,7 @@ impl App {
             ("Tab", "draft or complete it with claude"),
             ("^E", "edit it in $EDITOR"),
             ("g", "commit graph"),
+            ("w", "switch worktree"),
             ("p  P", "push / pull --ff-only"),
             ("f", "fetch (also every 3m)"),
             ("click ✓", "sync: fetch, pull, push"),
@@ -1371,6 +1483,58 @@ impl App {
         match flash {
             Some(line) => f.render_widget(line, footer),
             None => self.put_hints(f, footer, vec![], &[("esc", "back"), ("a", other), ("r", "refresh")], None),
+        }
+    }
+}
+
+impl App {
+    /// The repo's checkouts: folder, branch, and how many files each changed.
+    fn draw_worktrees(&mut self, f: &mut Frame, area: Rect) {
+        let [header, _, body, footer] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+        self.diff_header_y = header.y;
+        self.click_rows.clear();
+        let flash = self.flash_line(footer.width as usize);
+        let Some(v) = self.worktrees.as_mut() else { return };
+
+        let count = gray(format!("{} checkouts", v.items.len()));
+        let mut line = vec![accent("← "), "worktrees".bold()];
+        let used: usize = line.iter().map(|s| s.width()).sum();
+        line.push(" ".repeat((header.width as usize).saturating_sub(used + count.width())).into());
+        line.push(count);
+        f.render_widget(Line::from(line), header);
+
+        let name_w = v.items.iter().map(|(w, _)| w.name().chars().count()).max().unwrap_or(0);
+        let branch_w = v.items.iter().map(|(w, _)| w.branch.chars().count()).max().unwrap_or(0);
+        v.sel = v.sel.min(v.items.len().saturating_sub(1));
+        let mut lines = Vec::new();
+        for (i, (w, changed)) in v.items.iter().enumerate().take(body.height as usize) {
+            let mut spans = vec![
+                if i == v.sel { accent("› ") } else { "  ".into() },
+                format!("{:<name_w$}  ", w.name()).bold(),
+                accent(format!("{:<branch_w$}  ", w.branch)),
+                match changed {
+                    Some(0) => gray("✓ clean"),
+                    Some(n) => fg(format!("{n} changed"), Color::Yellow),
+                    None => fg("missing", RED),
+                },
+            ];
+            if w.path == self.dir {
+                spans.push(gray("  here"));
+            }
+            lines.push(Line::from(clip(spans, body.width as usize)));
+            self.click_rows.push((body.y + i as u16, i));
+        }
+        f.render_widget(Paragraph::new(lines), body);
+
+        match flash {
+            Some(line) => f.render_widget(line, footer),
+            None => self.put_hints(f, footer, vec![], &[("⏎", "switch"), ("esc", "back"), ("r", "refresh")], None),
         }
     }
 }
