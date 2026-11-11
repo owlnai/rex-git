@@ -167,8 +167,9 @@ back to the latest turn only.
 ## Notes
 
 - Git runs with prompts turned off (`GIT_TERMINAL_PROMPT=0`, and SSH in batch mode), so a
-  push that needs a password fails with a message instead of taking over the pane. Signed
-  commits work when your GPG pinentry is a GUI one, such as `pinentry-mac`.
+  push that needs a password fails with a message instead of taking over the pane. Your
+  own `core.sshCommand`, `GIT_SSH_COMMAND` or `GIT_SSH` is kept. Signed commits work when
+  your GPG pinentry is a GUI one, such as `pinentry-mac`.
 - The pane keeps its Rex title up to date, for example `git · main ↑2`.
 - Set `REX_GIT_DEBUG=/path/to/log` to log every input event, which helps when a key
   doesn't do what you expect.

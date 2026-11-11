@@ -6,17 +6,57 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::Mutex,
     thread,
 };
 
 const MAX_DIFF_FOR_PROMPT: usize = 60_000;
 
+/// The value to give `GIT_SSH_COMMAND`, or None to leave git's choice alone.
+/// The variable outranks `core.sshCommand` and `GIT_SSH`, so it's set only
+/// when it carries the user's own command, or when they have none.
+fn ssh_command(env_command: bool, env_ssh: bool, configured: Option<&str>) -> Option<String> {
+    if env_command || env_ssh {
+        return None;
+    }
+    let Some(configured) = configured.map(str::trim).filter(|c| !c.is_empty()) else {
+        return Some("ssh -o BatchMode=yes".into());
+    };
+    // Only OpenSSH is known to take the option; another program keeps its own arguments.
+    let program = configured.split_whitespace().next().unwrap_or("");
+    let is_ssh = Path::new(program).file_name().is_some_and(|n| n == "ssh");
+    is_ssh.then(|| format!("{configured} -o BatchMode=yes"))
+}
+
+/// `ssh_command` for `dir`, looked up once: `git_cmd` runs many times a second.
+fn ssh_command_for(dir: &Path) -> Option<String> {
+    static CACHE: Mutex<Option<HashMap<PathBuf, Option<String>>>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = cache.get_or_insert_with(HashMap::new);
+    if let Some(found) = cache.get(dir) {
+        return found.clone();
+    }
+    let configured = Command::new("git")
+        .args(["config", "--get", "core.sshCommand"])
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+    let command =
+        ssh_command(env::var_os("GIT_SSH_COMMAND").is_some(), env::var_os("GIT_SSH").is_some(), configured.as_deref());
+    cache.insert(dir.to_path_buf(), command.clone());
+    command
+}
+
 pub fn git_cmd(dir: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(dir).env("GIT_TERMINAL_PROMPT", "0").env("GIT_OPTIONAL_LOCKS", "0").stdin(Stdio::null());
     // The pane owns the terminal, so a password prompt would wreck the screen.
-    if env::var_os("GIT_SSH_COMMAND").is_none() {
-        cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+    if let Some(ssh) = ssh_command_for(dir) {
+        cmd.env("GIT_SSH_COMMAND", ssh);
     }
     cmd
 }
@@ -551,5 +591,35 @@ mod tests {
         let is_repo = Repo::load(&dir).is_repo;
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!is_repo);
+    }
+
+    #[test]
+    fn ssh_command_rules() {
+        assert_eq!(ssh_command(false, false, None).as_deref(), Some("ssh -o BatchMode=yes"));
+        assert_eq!(ssh_command(false, false, Some("  \n")).as_deref(), Some("ssh -o BatchMode=yes"));
+        assert_eq!(
+            ssh_command(false, false, Some("ssh -i ~/.ssh/work\n")).as_deref(),
+            Some("ssh -i ~/.ssh/work -o BatchMode=yes")
+        );
+        assert_eq!(
+            ssh_command(false, false, Some("/usr/bin/ssh -F cfg")).as_deref(),
+            Some("/usr/bin/ssh -F cfg -o BatchMode=yes")
+        );
+        assert_eq!(ssh_command(false, false, Some("plink -batch")), None);
+        assert_eq!(ssh_command(true, false, Some("ssh -i key")), None);
+        assert_eq!(ssh_command(false, true, None), None);
+    }
+
+    #[test]
+    fn configured_ssh_command_reaches_git() {
+        // The developer's own environment decides the result when these are set.
+        if env::var_os("GIT_SSH_COMMAND").is_some() || env::var_os("GIT_SSH").is_some() {
+            return;
+        }
+        let t = TempRepo::new("configured-ssh-command");
+        t.git(&["config", "core.sshCommand", "ssh -i /nonexistent/key"]);
+        let cmd = git_cmd(&t.dir, &["status"]);
+        let ssh = cmd.get_envs().find(|(k, _)| *k == "GIT_SSH_COMMAND").and_then(|(_, v)| v);
+        assert_eq!(ssh.and_then(|v| v.to_str()), Some("ssh -i /nonexistent/key -o BatchMode=yes"));
     }
 }
