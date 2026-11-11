@@ -97,6 +97,8 @@ enum Job {
 
 struct DiffView {
     entry: Entry,
+    /// What git printed, to tell when a reload changes nothing.
+    text: String,
     parsed: Parsed,
     scroll: usize,
     /// Rendered rows for the width they were wrapped at.
@@ -233,6 +235,21 @@ impl App {
             self.sel = i;
         }
         self.sel = self.sel.min(self.repo.entries.len().saturating_sub(1));
+        // An open diff follows its file: the selection stays on it and the
+        // diff reloads when the file changed again.
+        if self.mode == Mode::Diff
+            && let Some(i) = self.shown_index()
+        {
+            self.sel = i;
+            let entry = self.repo.entries[i].clone();
+            let text = git::diff_text(&self.dir, &entry, CONTEXTS[self.context]);
+            if let Some(d) = self.diff.as_mut()
+                && d.text != text
+            {
+                (d.parsed, d.rows) = (diff::parse(&text), None);
+                (d.entry, d.text) = (entry, text);
+            }
+        }
         self.last_refresh = Instant::now();
     }
 
@@ -467,9 +484,25 @@ impl App {
     fn open_diff(&mut self, i: usize) {
         let Some(e) = self.repo.entries.get(i).cloned() else { return };
         self.sel = i;
-        let parsed = diff::parse(&git::diff_text(&self.dir, &e, CONTEXTS[self.context]));
-        self.diff = Some(DiffView { entry: e, parsed, scroll: 0, rows: None });
+        let text = git::diff_text(&self.dir, &e, CONTEXTS[self.context]);
+        let parsed = diff::parse(&text);
+        self.diff = Some(DiffView { entry: e, text, parsed, scroll: 0, rows: None });
         self.mode = Mode::Diff;
+    }
+
+    /// Where the file in the diff view is in the list now, if it still has
+    /// changes in the same section.
+    fn shown_index(&self) -> Option<usize> {
+        let shown = &self.diff.as_ref()?.entry;
+        self.repo.entries.iter().position(|e| e.sec == shown.sec && e.path == shown.path)
+    }
+
+    /// The file in the diff view has no changes in its section any more, so
+    /// there is nothing for a key to act on: say so and go back to the list.
+    fn leave_stale_diff(&mut self) {
+        let path = self.diff.as_ref().map(|d| d.entry.path.clone()).unwrap_or_default();
+        self.mode = Mode::Files;
+        self.flash(format!("{path} changed since this diff was opened"), false);
     }
 
     fn open_graph(&mut self, all: bool) {
@@ -699,19 +732,35 @@ impl App {
             KeyCode::Home => d.scroll = 0,
             KeyCode::End | KeyCode::Char('G') => d.scroll = max,
             KeyCode::Char('e') => {
+                let scroll = d.scroll;
                 self.context = (self.context + 1) % CONTEXTS.len();
-                self.open_diff(self.sel);
+                match self.shown_index() {
+                    Some(i) => {
+                        self.open_diff(i);
+                        if let Some(d) = self.diff.as_mut() {
+                            d.scroll = scroll;
+                        }
+                    }
+                    None => self.leave_stale_diff(),
+                }
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
                 let n = self.repo.entries.len();
                 if n > 0 {
-                    let next = if k.code == KeyCode::Char('n') { (self.sel + 1) % n } else { (self.sel + n - 1) % n };
+                    let at = self.shown_index().unwrap_or(self.sel.min(n - 1));
+                    let next = if k.code == KeyCode::Char('n') { (at + 1) % n } else { (at + n - 1) % n };
                     self.open_diff(next);
+                } else {
+                    self.mode = Mode::Files;
                 }
             }
             KeyCode::Char('s') => {
                 let (path, scroll) = (d.entry.path.clone(), d.scroll);
-                self.toggle(self.sel);
+                let Some(shown) = self.shown_index() else {
+                    self.leave_stale_diff();
+                    return;
+                };
+                self.toggle(shown);
                 if let Some(i) = self.repo.entries.iter().position(|e| e.path == path) {
                     self.open_diff(i);
                     if let Some(d) = self.diff.as_mut() {
@@ -1859,6 +1908,56 @@ fn main() -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::testutil::TempRepo;
+
+    #[test]
+    fn stage_in_a_diff_never_hits_another_file() {
+        let t = TempRepo::new("stage-in-a-diff");
+        t.write("a.txt", "one\n");
+        t.write("b.txt", "one\n");
+        t.commit_all("base");
+        t.write("a.txt", "two\n");
+        t.write("b.txt", "two\n");
+        let mut app = App::new(t.dir.clone(), None);
+        let b = app.repo.entries.iter().position(|e| e.path == "b.txt").unwrap();
+        app.open_diff(b);
+        // b.txt is reverted behind the pane's back, as an agent would.
+        t.git(&["checkout", "--", "b.txt"]);
+        app.refresh();
+        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert_eq!(t.git(&["diff", "--cached", "--name-only"]), "", "a.txt must not be staged");
+        assert!(app.mode == Mode::Files);
+    }
+
+    #[test]
+    fn open_diff_reloads_when_the_file_changes() {
+        let t = TempRepo::new("open-diff-reloads");
+        t.write("a.txt", "one\n");
+        t.commit_all("base");
+        t.write("a.txt", "one\ntwo\n");
+        let mut app = App::new(t.dir.clone(), None);
+        app.open_diff(0);
+        assert_eq!(app.diff.as_ref().unwrap().parsed.adds, 1);
+        t.write("a.txt", "one\ntwo\nthree\n");
+        app.refresh();
+        assert_eq!(app.diff.as_ref().unwrap().parsed.adds, 2);
+    }
+
+    #[test]
+    fn stage_in_a_diff_stages_the_shown_file() {
+        let t = TempRepo::new("stage-shown-file");
+        t.write("a.txt", "one\n");
+        t.write("b.txt", "one\n");
+        t.commit_all("base");
+        t.write("a.txt", "two\n");
+        t.write("b.txt", "two\n");
+        let mut app = App::new(t.dir.clone(), None);
+        let b = app.repo.entries.iter().position(|e| e.path == "b.txt").unwrap();
+        app.open_diff(b);
+        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert_eq!(t.git(&["diff", "--cached", "--name-only"]), "b.txt\n");
+        assert!(app.mode == Mode::Diff);
+        assert_eq!(app.diff.as_ref().unwrap().entry.sec, Sec::Staged);
+    }
 
     #[test]
     fn truncation() {
