@@ -614,7 +614,6 @@ impl App {
             KeyCode::Char('e') => {
                 self.context = (self.context + 1) % CONTEXTS.len();
                 self.open_diff(self.sel);
-                self.flash(format!("{} lines of context", CONTEXTS[self.context]), false);
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
                 let n = self.repo.entries.len();
@@ -1310,7 +1309,9 @@ impl App {
         match flash {
             Some(line) => f.render_widget(line, footer),
             None => {
-                let keys = [("esc", "back"), ("s", "stage"), ("n", "next file"), ("e", "context")];
+                // The context hint carries its line count, so `e` needs no message.
+                let context = format!("{} lines context", CONTEXTS[self.context]);
+                let keys = [("esc", "back"), ("s", "stage"), ("n", "next file"), ("e", context.as_str())];
                 self.put_hints(f, footer, vec![], &keys, None);
             }
         }
