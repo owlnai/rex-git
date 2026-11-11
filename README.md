@@ -56,8 +56,8 @@ publishes a new branch, or fetches, pulls `--ff-only` and pushes.
 Files are grouped as staged, changed and untracked, with the lines each one adds and
 removes. `Space` or a click on `●` stages and unstages, `a` and `u` stage and unstage
 everything. Files a merge or rebase left in conflict come first, under `conflicts`;
-`Space` marks one resolved once its `<<<<<<<` markers are gone. Below them are the last
-three commits, the older ones fading out.
+`Space` marks one resolved once its `<<<<<<<` markers are gone, and `a` waits until
+every conflict is. Below them are the last three commits, the older ones fading out.
 
 The bottom line shows the keys that fit what you're doing, and clicking one presses it.
 
@@ -71,7 +71,8 @@ headers, every line has its number, and the lines left out between changes show 
 `⋯ 3 unchanged lines · fn f26()`, with the function they're in when git can tell.
 
 `n` and `N` move between files, `s` stages, and `e` shows more context (3, 10 or 30
-lines, as the hint says). `Esc` goes back.
+lines, as the hint says). They act on the file on screen, and the diff reloads when that
+file changes. `Esc` goes back.
 
 ### Committing
 
@@ -80,7 +81,8 @@ lines, as the hint says). `Esc` goes back.
 `c` opens the commit box, which takes the list's place while you write, with the staged
 count and the subject's length on its border (yellow past 50, red past 72). `Enter`
 commits, `Shift+Enter` adds a line, `Ctrl+E` opens the message in `$EDITOR`, and `↑`
-`↓` and the wheel scroll a long message.
+`↓` and the wheel scroll a long message. Pasting a message keeps its lines instead of
+committing at the first one.
 
 `Tab` asks Claude to draft the message, or to finish the one you started, keeping your
 words. When something is staged and the box is empty, `c` drafts one for you. With
@@ -120,7 +122,7 @@ Press `?` inside for this list.
 |---|---|
 | `↑` `↓` `j` `k` | Move |
 | `Enter`, click | Show the file's diff |
-| `Space`, click `●` | Stage or unstage the file |
+| `Space`, click `●` | Stage or unstage the file, or mark a conflict resolved |
 | `a` / `u` | Stage everything / unstage everything |
 | `c` | Write the commit message (drafted for you when something is staged) |
 | `Tab` | Draft a commit message with Claude |
