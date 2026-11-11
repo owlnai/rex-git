@@ -7,9 +7,9 @@ message (or have Claude draft it), commit, push and pull, all from a narrow pane
 to your work.
 
 <p>
-  <img src="docs/files.png" width="300" alt="The file list: staged, changed and untracked files with line counts">
-  <img src="docs/diff.png" width="300" alt="A diff with line numbers, green and red line backgrounds, and the edited words highlighted">
-  <img src="docs/commit.png" width="300" alt="A commit message being written in the commit box">
+  <img src="docs/files.png" width="200" alt="The file list: staged, changed and untracked files with line counts">
+  <img src="docs/diff.png" width="200" alt="A diff with line numbers, green and red line backgrounds, and the edited words highlighted">
+  <img src="docs/commit.png" width="200" alt="A commit message being written in the commit box">
 </p>
 
 With Axel, it also opens by itself in every thread window, on that thread's workspace,
