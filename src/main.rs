@@ -144,6 +144,8 @@ struct App {
     axel_rx: mpsc::Receiver<Option<axel::Info>>,
     last_refresh: Instant,
     last_fetch: Option<Instant>,
+    /// The last fetch that worked, which the header shows.
+    fetched: Option<Instant>,
     title: String,
     // Screen geometry from the last draw, for mouse clicks.
     click_rows: Vec<(u16, usize)>,
@@ -191,6 +193,7 @@ impl App {
             axel_rx,
             last_refresh: Instant::now(),
             last_fetch: None,
+            fetched: None,
             title: String::new(),
             click_rows: Vec::new(),
             marker_x: 0,
@@ -264,6 +267,9 @@ impl App {
                     self.syncing = None;
                     if what == "fetch" || what == "sync" {
                         self.last_fetch = Some(Instant::now());
+                        if result.is_ok() {
+                            self.fetched = self.last_fetch;
+                        }
                     }
                     match result {
                         Ok(text) if what == "commit" => {
@@ -860,7 +866,7 @@ impl App {
                 if *up != format!("origin/{}", r.branch) {
                     parts.push(format!("→ {up}"));
                 }
-                if let Some(t) = self.last_fetch {
+                if let Some(t) = self.fetched {
                     parts.push(format!("fetched {}", ago(t.elapsed())));
                 } else if parts.is_empty() {
                     parts.push(format!("→ {up}"));
