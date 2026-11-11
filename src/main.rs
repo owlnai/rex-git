@@ -653,10 +653,11 @@ impl App {
         } else {
             0
         };
-        let [header, list, recent, input, rule, footer] = Layout::vertical([
+        let [header, list, recent, _, input, rule, footer] = Layout::vertical([
             Constraint::Length(header_h),
             Constraint::Min(3),
             Constraint::Length(recent_h),
+            Constraint::Length(1),
             Constraint::Length(3),
             Constraint::Length(1),
             Constraint::Length(1),
