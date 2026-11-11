@@ -57,8 +57,10 @@ key.
 | `t` | Stage the files from the agents' latest turn (with Axel) |
 | `q` | Quit |
 
-In the commit box, `Enter` commits, `Shift+Enter` adds a line, and `Tab` asks Claude to
-draft the message, or to finish the one you started, keeping your words. With nothing
+The commit box sits under the file list. While you write, it takes the list's place, with
+the subject's length on its border; `↑` `↓` and the wheel scroll a long message. `Enter`
+commits, `Shift+Enter` adds a line, `Ctrl+E` opens the message in `$EDITOR`, and `Tab`
+asks Claude to draft the message, or to finish the one you started, keeping your words. With nothing
 staged, `Enter` asks first: `Enter` again stages everything and commits, `s` goes back
 to pick files.
 

@@ -28,11 +28,12 @@ use ratatui::{
             KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
         },
         execute,
+        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
     layout::{Constraint, Layout, Margin, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    style::{Color, Style, Stylize},
     text::{Line, Span},
-    widgets::{Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Clear, Paragraph, Wrap},
 };
 
 use crate::{
@@ -113,6 +114,12 @@ struct App {
     msg: String,
     /// Enter was pressed with nothing staged: ask whether to stage everything.
     confirm_stage: bool,
+    /// The message box's first visible row, and whether it follows the cursor.
+    msg_scroll: usize,
+    msg_follow: bool,
+    msg_page: usize,
+    /// Ctrl+E asked for $EDITOR, which the run loop opens.
+    edit: bool,
     flash: Option<(String, bool, Instant)>,
     drafting: Option<Instant>,
     syncing: Option<(&'static str, Instant)>,
@@ -150,6 +157,10 @@ impl App {
             context: 0,
             msg: String::new(),
             confirm_stage: false,
+            msg_scroll: 0,
+            msg_follow: true,
+            msg_page: 8,
+            edit: false,
             flash: None,
             drafting: None,
             syncing: None,
@@ -208,6 +219,7 @@ impl App {
                         Ok(text) => {
                             self.msg = text;
                             self.mode = Mode::Commit;
+                            (self.msg_scroll, self.msg_follow) = (0, false);
                         }
                         Err(err) => self.flash(err, true),
                     }
@@ -220,6 +232,7 @@ impl App {
                     match result {
                         Ok(text) if what == "commit" => {
                             self.msg.clear();
+                            (self.msg_scroll, self.msg_follow) = (0, true);
                             self.mode = Mode::Files;
                             self.flash(text, false);
                         }
@@ -473,9 +486,23 @@ impl App {
             }
             return;
         }
+        let page = self.msg_page.max(1);
         match k.code {
             KeyCode::Esc => self.mode = Mode::Files,
             KeyCode::Tab => self.draft(),
+            KeyCode::Char('e') if ctrl => self.edit = true,
+            KeyCode::Up => (self.msg_scroll, self.msg_follow) = (self.msg_scroll.saturating_sub(1), false),
+            KeyCode::Down => (self.msg_scroll, self.msg_follow) = (self.msg_scroll + 1, false),
+            KeyCode::PageUp => (self.msg_scroll, self.msg_follow) = (self.msg_scroll.saturating_sub(page), false),
+            KeyCode::PageDown => (self.msg_scroll, self.msg_follow) = (self.msg_scroll + page, false),
+            _ => self.on_commit_edit(k, ctrl, newline),
+        }
+    }
+
+    fn on_commit_edit(&mut self, k: KeyEvent, ctrl: bool, newline: bool) {
+        // Typing brings the cursor back into view.
+        self.msg_follow = true;
+        match k.code {
             KeyCode::Enter if newline => self.msg.push('\n'),
             KeyCode::Char('j') if ctrl => self.msg.push('\n'),
             KeyCode::Enter => self.commit(),
@@ -553,10 +580,14 @@ impl App {
             (Mode::Diff, MouseEventKind::Down(MouseButton::Left)) if m.row == self.diff_header_y => {
                 self.mode = Mode::Files;
             }
-            (Mode::Files | Mode::Commit, MouseEventKind::ScrollDown) => {
+            (Mode::Commit, MouseEventKind::ScrollDown) => (self.msg_scroll, self.msg_follow) = (self.msg_scroll + 3, false),
+            (Mode::Commit, MouseEventKind::ScrollUp) => {
+                (self.msg_scroll, self.msg_follow) = (self.msg_scroll.saturating_sub(3), false);
+            }
+            (Mode::Files, MouseEventKind::ScrollDown) => {
                 self.sel = (self.sel + 1).min(self.repo.entries.len().saturating_sub(1));
             }
-            (Mode::Files | Mode::Commit, MouseEventKind::ScrollUp) => self.sel = self.sel.saturating_sub(1),
+            (Mode::Files, MouseEventKind::ScrollUp) => self.sel = self.sel.saturating_sub(1),
             (Mode::Files | Mode::Commit, MouseEventKind::Down(MouseButton::Left)) => {
                 if let Some(&(_, i)) = self.click_rows.iter().find(|(y, _)| *y == m.row) {
                     if m.column <= self.marker_x + 1 {
@@ -601,11 +632,22 @@ impl App {
         }
 
         let header_h = if self.axel.is_some() { 4 } else { 3 };
-        let input_h = if self.drafting.is_some() || self.msg.is_empty() {
-            1
-        } else {
-            (wrap_message(&self.msg, area.width as usize).len() as u16).clamp(1, 8)
-        };
+        if self.mode == Mode::Commit {
+            // The message takes the file list's place while it's being written.
+            let [header, input, rule, footer] = Layout::vertical([
+                Constraint::Length(header_h),
+                Constraint::Min(5),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .areas(area);
+            self.click_rows.clear();
+            self.draw_header(f, header);
+            self.draw_input(f, input);
+            f.render_widget(Line::from(gray("─".repeat(rule.width as usize))), rule);
+            self.draw_footer(f, footer);
+            return;
+        }
         let recent_h = if area.height > 24 && !self.repo.commits.is_empty() {
             self.repo.commits.len().min(3) as u16 + 2
         } else {
@@ -615,7 +657,7 @@ impl App {
             Constraint::Length(header_h),
             Constraint::Min(3),
             Constraint::Length(recent_h),
-            Constraint::Length(input_h + 1),
+            Constraint::Length(3),
             Constraint::Length(1),
             Constraint::Length(1),
         ])
@@ -817,43 +859,67 @@ impl App {
         f.render_widget(Paragraph::new(lines), area);
     }
 
+    /// The commit message box: one line while the files have focus, the whole
+    /// list's space while writing.
     fn draw_input(&mut self, f: &mut Frame, area: Rect) {
         self.commit_rect = area;
-        let [_, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
         let active = self.mode == Mode::Commit;
-        let prompt = if active { accent("› ") } else { gray("› ") };
+        let mut block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(GRAY));
+        if active {
+            let subject = self.msg.split('\n').next().unwrap_or("").chars().count();
+            let color = match subject {
+                0..=50 => GRAY,
+                51..=72 => Color::Yellow,
+                _ => RED,
+            };
+            let staged = match self.repo.staged() {
+                0 => "nothing staged".to_string(),
+                n => format!("{n} staged"),
+            };
+            block = block
+                .border_style(Style::new().fg(ACCENT))
+                .title(Line::from(accent(" commit message ")))
+                .title(Line::from(vec![gray(format!(" {staged} · ")), fg(format!("{subject} "), color)]).right_aligned());
+        }
+        let body = block.inner(area);
+        f.render_widget(block, area);
+        let width = body.width as usize;
+
         let text: Vec<Line> = if let Some(since) = self.drafting {
             let what = if self.msg.is_empty() { "drafting with claude…" } else { "completing with claude…" };
             vec![Line::from(vec![accent(format!("{} ", self.spinner(since))), gray(what)])]
         } else if self.msg.is_empty() {
-            let hint = if active { "commit message · Tab drafts it" } else { "c to commit · Tab drafts a message" };
-            let mut line = vec![prompt];
+            let hint = if active { "write a message, or Tab to draft one" } else { "c to commit · Tab drafts a message" };
+            let mut line = Vec::new();
             if active {
                 line.push(accent("▏"));
             }
             line.push(gray(hint));
-            vec![Line::from(line)]
+            vec![Line::from(clip(line, width))]
+        } else if !active {
+            let mut lines = self.msg.split('\n');
+            let subject = lines.next().unwrap_or("").to_string();
+            let more = lines.filter(|l| !l.trim().is_empty()).count();
+            let more = match more {
+                0 => String::new(),
+                1 => "  +1 line".into(),
+                n => format!("  +{n} lines"),
+            };
+            let room = width.saturating_sub(more.chars().count()).max(8);
+            vec![Line::from(clip(vec![truncate_end(&subject, room).dim(), gray(more)], width))]
         } else {
-            let mut lines: Vec<Line> = wrap_message(&self.msg, body.width as usize)
+            let mut lines: Vec<Line> = wrap_message(&self.msg, width)
                 .into_iter()
-                .enumerate()
-                .map(|(i, (subject, text))| {
-                    let lead = if i == 0 { prompt.clone() } else { "  ".into() };
-                    Line::from(vec![lead, if subject { text.bold() } else { text.into() }])
-                })
+                .map(|(subject, text)| Line::from(if subject { text.bold() } else { text.into() }))
                 .collect();
-            // Keep the cursor visible at the end, keeping the newest lines in view.
+            if let Some(last) = lines.last_mut() {
+                last.push_span(accent("▏"));
+            }
             let keep = body.height as usize;
-            if lines.len() > keep {
-                lines.drain(..lines.len() - keep);
-            }
-            if active {
-                if let Some(last) = lines.last_mut() {
-                    last.push_span(accent("▏"));
-                }
-            } else {
-                lines.iter_mut().for_each(|l| l.style = Style::new().add_modifier(Modifier::DIM));
-            }
+            let max = lines.len().saturating_sub(keep);
+            self.msg_page = keep;
+            self.msg_scroll = if self.msg_follow { max } else { self.msg_scroll.min(max) };
+            lines.drain(..self.msg_scroll);
             lines
         };
         f.render_widget(Paragraph::new(text), body);
@@ -875,11 +941,7 @@ impl App {
         } else if let Some(line) = self.flash_line(area.width as usize) {
             line
         } else if self.mode == Mode::Commit {
-            let staged = self.repo.staged();
-            let mut keys = vec![("Enter", "commit"), ("⇧Enter", "new line"), ("Tab", "draft")];
-            if staged == 0 {
-                keys[0] = ("Enter", "stage all & commit");
-            }
+            let keys = [("⏎", "commit"), ("⇧⏎", "line"), ("Tab", "draft"), ("^E", "editor"), ("esc", "back")];
             hints(&keys, area.width as usize)
         } else {
             let mut keys = vec![("spc", "stage"), ("⏎", "diff"), ("c", "commit"), ("Tab", "draft")];
@@ -914,6 +976,7 @@ impl App {
             ("t", "stage the agents' last turn"),
             ("c", "write the commit message"),
             ("Tab", "draft or complete it with claude"),
+            ("^E", "edit it in $EDITOR"),
             ("p  P", "push / pull --ff-only"),
             ("f", "fetch (also every 3m)"),
             ("q", "quit"),
@@ -1058,10 +1121,10 @@ fn render_diff(p: &Parsed, width: usize) -> Vec<Line<'static>> {
     rows
 }
 
-/// Word-wrap a commit message for the box: two columns go to the prompt or
-/// the indent, one to the cursor. Each row says whether it's in the subject.
+/// Word-wrap a commit message for the box, leaving a column for the cursor.
+/// Each row says whether it's in the subject.
 fn wrap_message(msg: &str, width: usize) -> Vec<(bool, String)> {
-    let w = width.saturating_sub(3).max(8);
+    let w = width.saturating_sub(1).max(8);
     let mut rows = Vec::new();
     for (i, line) in msg.split('\n').enumerate() {
         let mut row = String::new();
@@ -1187,7 +1250,35 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                 _ => {}
             }
         }
+        if app.edit {
+            app.edit = false;
+            edit_message(term, app)?;
+        }
     }
+    Ok(())
+}
+
+/// Hand the terminal to $VISUAL or $EDITOR to edit the message, then take it back.
+fn edit_message(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
+    let path = env::temp_dir().join(format!("rex-git-{}.txt", std::process::id()));
+    std::fs::write(&path, &app.msg)?;
+    let editor = env::var("VISUAL").or_else(|_| env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
+    execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
+    disable_raw_mode()?;
+    // Through sh, so an editor with arguments like `code -w` works.
+    let status = Command::new("sh").args(["-c", &format!("{editor} \"$1\""), "sh"]).arg(&path).status();
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    term.clear()?;
+    match status {
+        Ok(s) if s.success() => {
+            app.msg = std::fs::read_to_string(&path)?.trim_end().to_string();
+            (app.msg_scroll, app.msg_follow) = (0, false);
+        }
+        Ok(s) => app.flash(format!("{editor} exited with {s}"), true),
+        Err(err) => app.flash(format!("{editor}: {err}"), true),
+    }
+    let _ = std::fs::remove_file(&path);
     Ok(())
 }
 
