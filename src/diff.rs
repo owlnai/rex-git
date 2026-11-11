@@ -44,11 +44,25 @@ impl Parsed {
 }
 
 fn parse_range(s: &str) -> (u32, u32) {
-    let s = &s[1..];
+    let s = s.get(1..).unwrap_or("");
     match s.split_once(',') {
         Some((a, b)) => (a.parse().unwrap_or(0), b.parse().unwrap_or(0)),
         None => (s.parse().unwrap_or(0), 1),
     }
+}
+
+/// A line of a merge's combined diff, which has one marker per parent: it's
+/// added when any parent lacks it, removed when it's gone from the result.
+fn combined_line(l: &str, cols: usize) -> (Kind, &str) {
+    let Some(marks) = l.get(..cols) else { return (Kind::Ctx, l) };
+    let kind = if marks.contains('+') {
+        Kind::Add
+    } else if marks.contains('-') {
+        Kind::Del
+    } else {
+        Kind::Ctx
+    };
+    (kind, &l[cols..])
 }
 
 pub fn parse(text: &str) -> Parsed {
@@ -68,42 +82,60 @@ pub fn parse(text: &str) -> Parsed {
         return out;
     }
 
-    let (mut old, mut new, mut old_end) = (0u32, 0u32, 1u32);
+    // `cols` is how many marker columns a line has: 1, or one per parent in a
+    // merge's combined diff, whose headers are `@@@ -a,b -a,b +c,d @@@`.
+    let (mut old, mut new, mut end, mut cols) = (0u32, 0u32, 1u32, 1usize);
     let mut in_hunk = false;
     for l in text.lines() {
-        if let Some(rest) = l.strip_prefix("@@ ") {
-            let mut parts = rest.splitn(3, ' ');
+        let ats = l.chars().take_while(|&c| c == '@').count();
+        if ats >= 2
+            && let Some(rest) = l[ats..].strip_prefix(' ')
+        {
+            cols = ats - 1;
+            let mut parts = rest.splitn(cols + 2, ' ');
             let (a, b) = parse_range(parts.next().unwrap_or("-0"));
-            let (c, _) = parse_range(parts.next().unwrap_or("+0"));
-            let context = parts.next().unwrap_or("").trim_start_matches("@@").trim().to_string();
-            let hidden = a.saturating_sub(old_end);
+            let mut parts = parts.skip(cols - 1);
+            let (c, d) = parse_range(parts.next().unwrap_or("+0"));
+            let context = parts.next().unwrap_or("").trim_start_matches('@').trim().to_string();
+            // A combined diff has several old sides, so its gaps are counted on the new one.
+            let (start, len) = if cols == 1 { (a, b) } else { (c, d) };
+            let hidden = start.saturating_sub(end);
             if hidden > 0 {
                 out.items.push(Item::Gap { hidden, context });
             }
             old = a;
             new = c;
-            old_end = a + b;
+            end = start + len;
             in_hunk = true;
             continue;
         }
         if !in_hunk {
             continue;
         }
-        let (kind, body) = match l.chars().next() {
-            Some('+') => (Kind::Add, &l[1..]),
-            Some('-') => (Kind::Del, &l[1..]),
-            Some(' ') => (Kind::Ctx, &l[1..]),
-            Some('\\') => {
-                out.items.push(Item::Note(l.trim_start_matches("\\ ").to_string()));
-                continue;
+        if l.starts_with('\\') {
+            out.items.push(Item::Note(l.trim_start_matches("\\ ").to_string()));
+            continue;
+        }
+        let (kind, body) = if cols > 1 {
+            combined_line(l, cols)
+        } else {
+            match l.chars().next() {
+                Some('+') => (Kind::Add, &l[1..]),
+                Some('-') => (Kind::Del, &l[1..]),
+                Some(' ') => (Kind::Ctx, &l[1..]),
+                _ => (Kind::Ctx, l),
             }
-            _ => (Kind::Ctx, l),
         };
         let num = match kind {
             Kind::Add => {
                 new += 1;
                 out.adds += 1;
                 new - 1
+            }
+            // A combined diff has no single old file to number a removed line in.
+            Kind::Del if cols > 1 => {
+                out.dels += 1;
+                new
             }
             Kind::Del => {
                 old += 1;
@@ -191,6 +223,32 @@ mod tests {
         assert_eq!(add.emph, Some((8, 9)));
         let Item::Line(last) = &p.items[4] else { panic!() };
         assert_eq!(last.num, 12);
+    }
+
+    const COMBINED: &str = "diff --cc f\nindex 797be14,0c02ccc..0000000\n--- a/f\n+++ b/f\n\
+@@@ -1,3 -1,3 +1,7 @@@\n  a\n++<<<<<<< HEAD\n +Y\n++=======\n+ X\n++>>>>>>> other\n  c\n";
+
+    #[test]
+    fn combined_diff_of_a_conflict() {
+        let p = parse(COMBINED);
+        assert_eq!((p.adds, p.dels), (5, 0));
+        assert_eq!(p.items.len(), 7);
+        let lines: Vec<(Kind, u32, &str)> = p
+            .items
+            .iter()
+            .filter_map(|i| if let Item::Line(l) = i { Some((l.kind, l.num, l.text.as_str())) } else { None })
+            .collect();
+        assert_eq!(lines[0], (Kind::Ctx, 1, "a"));
+        assert_eq!(lines[1], (Kind::Add, 2, "<<<<<<< HEAD"));
+        assert_eq!(lines[2], (Kind::Add, 3, "Y"));
+        assert_eq!(lines[4], (Kind::Add, 5, "X"));
+        assert_eq!(lines[6], (Kind::Ctx, 7, "c"));
+    }
+
+    #[test]
+    fn malformed_hunk_header_does_not_panic() {
+        let p = parse("@@ \n+a\n");
+        assert_eq!(p.adds, 1);
     }
 
     #[test]
