@@ -3,7 +3,7 @@
 //! Shows the branch and its sync state, the changed files (marking the ones
 //! an Axel thread's agents changed), and recent commits. Click a file or
 //! press Enter for its diff, Space to stage it, `c` to write a commit message
-//! (Tab asks Claude to draft or complete it), and
+//! (Tab asks Claude to draft or complete it), `g` for the commit graph, and
 //! `p`/`P`/`f` to push, pull and fetch.
 
 mod axel;
@@ -47,6 +47,9 @@ const FLASH: Duration = Duration::from_secs(6);
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const CONTEXTS: [u32; 3] = [3, 10, 30];
 
+// Lanes in the commit graph take these in turn.
+const LANES: [Color; 6] = [ACCENT, Color::Blue, GREEN, Color::Yellow, Color::Magenta, Color::Cyan];
+
 // Axel's palette: coral accent, orange agent names, gray labels.
 const ACCENT: Color = Color::Rgb(255, 117, 101);
 const AGENT: Color = Color::Indexed(208);
@@ -79,6 +82,7 @@ enum Mode {
     Files,
     Diff,
     Commit,
+    Graph,
     Help,
 }
 
@@ -93,6 +97,12 @@ struct DiffView {
     scroll: usize,
     /// Rendered rows for the width they were wrapped at.
     rows: Option<(u16, Vec<Line<'static>>)>,
+}
+
+struct GraphView {
+    all: bool,
+    rows: Vec<git::GraphRow>,
+    scroll: usize,
 }
 
 enum Row {
@@ -110,6 +120,7 @@ struct App {
     scroll: usize,
     mode: Mode,
     diff: Option<DiffView>,
+    graph: Option<GraphView>,
     context: usize,
     msg: String,
     /// Enter was pressed with nothing staged: ask whether to stage everything.
@@ -154,6 +165,7 @@ impl App {
             scroll: 0,
             mode: Mode::Files,
             diff: None,
+            graph: None,
             context: 0,
             msg: String::new(),
             confirm_stage: false,
@@ -401,6 +413,16 @@ impl App {
         self.mode = Mode::Diff;
     }
 
+    fn open_graph(&mut self, all: bool) {
+        match git::graph(&self.dir, all) {
+            Ok(rows) => {
+                self.graph = Some(GraphView { all, rows, scroll: 0 });
+                self.mode = Mode::Graph;
+            }
+            Err(err) => self.flash(err, true),
+        }
+    }
+
     // ------------------------------------------------------------ input
 
     fn on_key(&mut self, k: KeyEvent) {
@@ -412,6 +434,7 @@ impl App {
             Mode::Help => self.mode = Mode::Files,
             Mode::Commit => self.on_commit_key(k),
             Mode::Diff => self.on_diff_key(k),
+            Mode::Graph => self.on_graph_key(k),
             Mode::Files => self.on_files_key(k),
         }
     }
@@ -442,6 +465,7 @@ impl App {
             KeyCode::Char('t') => self.stage_turn(),
             KeyCode::Char('c') | KeyCode::Char('i') => self.enter_commit(),
             KeyCode::Tab => self.draft(),
+            KeyCode::Char('g') => self.open_graph(false),
             KeyCode::Char('p') => self.sync("push", false),
             KeyCode::Char('P') => self.sync("pull", false),
             KeyCode::Char('f') => self.sync("fetch", false),
@@ -564,6 +588,38 @@ impl App {
         }
     }
 
+    fn on_graph_key(&mut self, k: KeyEvent) {
+        let page = self.diff_page.max(1);
+        let Some(g) = self.graph.as_mut() else {
+            self.mode = Mode::Files;
+            return;
+        };
+        let max = g.rows.len().saturating_sub(1);
+        match k.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('g') | KeyCode::Left | KeyCode::Char('h') => {
+                self.mode = Mode::Files
+            }
+            KeyCode::Down | KeyCode::Char('j') => g.scroll = (g.scroll + 1).min(max),
+            KeyCode::Up | KeyCode::Char('k') => g.scroll = g.scroll.saturating_sub(1),
+            KeyCode::PageDown | KeyCode::Char(' ') => g.scroll = (g.scroll + page).min(max),
+            KeyCode::PageUp | KeyCode::Char('b') => g.scroll = g.scroll.saturating_sub(page),
+            KeyCode::Home => g.scroll = 0,
+            KeyCode::End | KeyCode::Char('G') => g.scroll = max,
+            KeyCode::Char('a') => {
+                let all = !g.all;
+                self.open_graph(all);
+            }
+            KeyCode::Char('r') => {
+                let (all, scroll) = (g.all, g.scroll);
+                self.open_graph(all);
+                if let Some(g) = self.graph.as_mut() {
+                    g.scroll = scroll.min(g.rows.len().saturating_sub(1));
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn on_mouse(&mut self, m: MouseEvent) {
         match (self.mode, m.kind) {
             (Mode::Diff, MouseEventKind::ScrollDown) => {
@@ -577,8 +633,18 @@ impl App {
                     d.scroll = d.scroll.saturating_sub(3);
                 }
             }
-            (Mode::Diff, MouseEventKind::Down(MouseButton::Left)) if m.row == self.diff_header_y => {
+            (Mode::Diff | Mode::Graph, MouseEventKind::Down(MouseButton::Left)) if m.row == self.diff_header_y => {
                 self.mode = Mode::Files;
+            }
+            (Mode::Graph, MouseEventKind::ScrollDown) => {
+                if let Some(g) = self.graph.as_mut() {
+                    g.scroll = (g.scroll + 3).min(g.rows.len().saturating_sub(1));
+                }
+            }
+            (Mode::Graph, MouseEventKind::ScrollUp) => {
+                if let Some(g) = self.graph.as_mut() {
+                    g.scroll = g.scroll.saturating_sub(3);
+                }
             }
             (Mode::Commit, MouseEventKind::ScrollDown) => (self.msg_scroll, self.msg_follow) = (self.msg_scroll + 3, false),
             (Mode::Commit, MouseEventKind::ScrollUp) => {
@@ -628,6 +694,10 @@ impl App {
         }
         if self.mode == Mode::Diff {
             self.draw_diff(f, area);
+            return;
+        }
+        if self.mode == Mode::Graph {
+            self.draw_graph(f, area);
             return;
         }
 
@@ -949,6 +1019,7 @@ impl App {
             if self.axel.is_some() {
                 keys.push(("t", "stage turn"));
             }
+            keys.push(("g", "graph"));
             keys.push(("?", "keys"));
             hints(&keys, area.width as usize)
         };
@@ -978,6 +1049,7 @@ impl App {
             ("c", "write the commit message"),
             ("Tab", "draft or complete it with claude"),
             ("^E", "edit it in $EDITOR"),
+            ("g", "commit graph"),
             ("p  P", "push / pull --ff-only"),
             ("f", "fetch (also every 3m)"),
             ("q", "quit"),
@@ -989,6 +1061,9 @@ impl App {
             ("s", "stage / unstage the file"),
             ("e", "more context"),
             ("esc", "back"),
+            ("", ""),
+            ("in the graph", ""),
+            ("a", "all branches / this one"),
         ];
         let h = (rows.len() as u16 + 2).min(area.height);
         let rect = Rect { x: area.x, y: area.y + area.height.saturating_sub(h) / 2, width: area.width, height: h };
@@ -1053,6 +1128,98 @@ impl App {
         });
         f.render_widget(line, footer);
     }
+
+    fn draw_graph(&mut self, f: &mut Frame, area: Rect) {
+        let [header, _, body, footer] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+        self.diff_header_y = header.y;
+        self.diff_page = body.height.saturating_sub(2) as usize;
+        let flash = self.flash_line(footer.width as usize);
+        let Some(g) = self.graph.as_mut() else { return };
+
+        let scope = if g.all { "all branches".to_string() } else { self.repo.branch.clone() };
+        let count = g.rows.iter().filter(|r| r.commit.is_some()).count();
+        let count = gray(format!("{count} commits"));
+        let room = (header.width as usize).saturating_sub(count.width() + 12);
+        let mut line = vec![accent("← "), "graph".bold(), gray(" · "), truncate_end(&scope, room).into()];
+        let used: usize = line.iter().map(|s| s.width()).sum();
+        line.push(" ".repeat((header.width as usize).saturating_sub(used + count.width())).into());
+        line.push(count);
+        f.render_widget(Line::from(line), header);
+
+        g.scroll = g.scroll.min(g.rows.len().saturating_sub(1));
+        let width = body.width as usize;
+        let visible: Vec<Line> = g
+            .rows
+            .iter()
+            .skip(g.scroll)
+            .take(body.height as usize)
+            .map(|r| graph_line(r, width))
+            .collect();
+        f.render_widget(Paragraph::new(visible), body);
+
+        let line = flash.unwrap_or_else(|| {
+            let other = if g.all { "this branch" } else { "all branches" };
+            hints(&[("esc", "back"), ("a", other), ("r", "refresh")], footer.width as usize)
+        });
+        f.render_widget(line, footer);
+    }
+}
+
+/// One graph row: the lanes in their colors, then the commit's short hash,
+/// branches and tags, subject, and age, with the subject giving way first.
+fn graph_line(row: &git::GraphRow, width: usize) -> Line<'static> {
+    let mut spans: Vec<Span> = row
+        .lanes
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            let glyph = match c {
+                '*' => '●',
+                '|' => '│',
+                '/' => '╱',
+                '\\' => '╲',
+                c => c,
+            };
+            // Diagonals sit between two lanes; color them as the one they lead to.
+            let lane = if matches!(c, '/' | '\\' | '_') { i.div_ceil(2) } else { i / 2 };
+            fg(glyph.to_string(), LANES[lane % LANES.len()])
+        })
+        .collect();
+    let Some(c) = &row.commit else { return Line::from(clip(spans, width)) };
+    spans.push(" ".into());
+    spans.push(gray(c.hash.clone()));
+    for r in &c.refs {
+        let span = if let Some(branch) = r.strip_prefix("HEAD -> ") {
+            accent(branch.to_string()).bold()
+        } else if let Some(tag) = r.strip_prefix("tag: ") {
+            fg(tag.to_string(), Color::Yellow)
+        } else if r == "HEAD" {
+            accent("HEAD").bold()
+        } else if r.ends_with("/HEAD") {
+            continue;
+        } else if r.contains('/') {
+            gray(r.clone())
+        } else {
+            fg(r.clone(), Color::Blue)
+        };
+        spans.push(" ".into());
+        spans.push(span);
+    }
+    let used: usize = spans.iter().map(|s| s.width()).sum();
+    let room = width.saturating_sub(used + c.when.chars().count() + 2);
+    if room >= 4 {
+        spans.push(" ".into());
+        spans.push(truncate_end(&c.subject, room).into());
+    }
+    spans.push(" ".into());
+    spans.push(gray(c.when.clone()));
+    Line::from(clip(spans, width))
 }
 
 /// Lay a parsed diff out as rows `width` wide: a line-number gutter, then the

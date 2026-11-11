@@ -209,6 +209,46 @@ pub fn diff_text(dir: &Path, e: &Entry, context: u32) -> String {
 /// Ask Claude for a commit message for the staged changes, or for all
 /// changes when nothing is staged. `start` is what the user has typed so far,
 /// to complete; `intent` is the Axel thread's goal, for the why.
+/// One row of `git log --graph`: the lane drawing, and the commit if the row
+/// has one (rows that only bend lanes don't).
+pub struct GraphRow {
+    pub lanes: String,
+    pub commit: Option<GraphCommit>,
+}
+
+pub struct GraphCommit {
+    pub hash: String,
+    pub refs: Vec<String>,
+    pub subject: String,
+    pub when: String,
+}
+
+/// The commit graph for HEAD, or for every branch and tag with `all`.
+pub fn graph(dir: &Path, all: bool) -> Result<Vec<GraphRow>, String> {
+    let mut args = vec!["log", "--graph", "--color=never", "-n", "500", "--format=%x1f%h%x1f%D%x1f%s%x1f%cr"];
+    if all {
+        args.push("--all");
+    }
+    let out = git(dir, &args)?;
+    Ok(out
+        .lines()
+        .map(|l| {
+            let mut p = l.split('\x1f');
+            let lanes = p.next().unwrap_or("").trim_end().to_string();
+            let commit = match (p.next(), p.next(), p.next(), p.next()) {
+                (Some(hash), Some(refs), Some(subject), Some(when)) => Some(GraphCommit {
+                    hash: hash.into(),
+                    refs: refs.split(", ").filter(|r| !r.is_empty()).map(String::from).collect(),
+                    subject: subject.into(),
+                    when: short_age(when),
+                }),
+                _ => None,
+            };
+            GraphRow { lanes, commit }
+        })
+        .collect())
+}
+
 pub fn draft_message(dir: &Path, start: &str, intent: &str) -> Result<String, String> {
     let mut diff = git(dir, &["diff", "--cached", "--no-color"])?;
     if diff.trim().is_empty() {

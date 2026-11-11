@@ -53,6 +53,7 @@ key.
 | `a` / `u` | Stage everything / unstage everything |
 | `c` | Write the commit message (drafted for you when something is staged) |
 | `Tab` | Draft a commit message with Claude |
+| `g` | Show the commit graph |
 | `p` / `P` / `f` | Push / pull `--ff-only` / fetch (it also fetches every 3 minutes) |
 | `t` | Stage the files from the agents' latest turn (with Axel) |
 | `q` | Quit |
@@ -63,6 +64,9 @@ commits, `Shift+Enter` adds a line, `Ctrl+E` opens the message in `$EDITOR`, and
 asks Claude to draft the message, or to finish the one you started, keeping your words. With nothing
 staged, `Enter` asks first: `Enter` again stages everything and commits, `s` goes back
 to pick files.
+
+The commit graph shows the current branch, and `a` switches to every branch and tag. `Esc` or
+`g` goes back.
 
 In a diff, `n` and `N` move between files, `s` stages, `e` shows more context, and `Esc` goes back.
 
