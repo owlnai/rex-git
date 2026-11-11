@@ -74,6 +74,8 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Sec {
+    /// Left unmerged by a merge, rebase or cherry-pick.
+    Conflict,
     Staged,
     Changed,
     Untracked,
@@ -82,6 +84,7 @@ pub enum Sec {
 impl Sec {
     pub fn title(self) -> &'static str {
         match self {
+            Sec::Conflict => "conflicts",
             Sec::Staged => "staged",
             Sec::Changed => "changes",
             Sec::Untracked => "untracked",
@@ -214,6 +217,10 @@ fn parse_entries<'a>(mut toks: impl Iterator<Item = &'a str>) -> Vec<Entry> {
         match (x, y) {
             ('?', _) => entries.push(Entry { sec: Sec::Untracked, code: '?', path }),
             ('!', _) => {}
+            // Unmerged: one entry, not a staged one and a changed one.
+            ('D', 'D') | ('A', 'U') | ('U', 'D') | ('U', 'A') | ('D', 'U') | ('A', 'A') | ('U', 'U') => {
+                entries.push(Entry { sec: Sec::Conflict, code: 'U', path })
+            }
             _ => {
                 if x != ' ' {
                     entries.push(Entry { sec: Sec::Staged, code: x, path: path.clone() });
@@ -244,6 +251,11 @@ impl Worktree {
 }
 
 /// How many files a checkout has changed, or None when it can't be read.
+/// Whether the file still has a conflict's opening marker in it.
+pub fn has_conflict_markers(dir: &Path, path: &str) -> bool {
+    std::fs::read(dir.join(path)).is_ok_and(|bytes| bytes.split(|&b| b == b'\n').any(|l| l.starts_with(b"<<<<<<< ")))
+}
+
 pub fn changed_count(dir: &Path) -> Option<usize> {
     git(dir, &["status", "--porcelain"]).ok().map(|s| s.lines().count())
 }
@@ -296,7 +308,7 @@ pub fn diff_text(dir: &Path, e: &Entry, context: u32) -> String {
     let u = format!("-U{context}");
     let out = match e.sec {
         Sec::Staged => git(dir, &["diff", "--cached", "--no-color", &u, "--", &e.path]),
-        Sec::Changed => git(dir, &["diff", "--no-color", &u, "--", &e.path]),
+        Sec::Changed | Sec::Conflict => git(dir, &["diff", "--no-color", &u, "--", &e.path]),
         // --no-index exits 1 when the files differ, which they always do here.
         Sec::Untracked => git_cmd(dir, &["diff", "--no-index", "--no-color", &u, "--", "/dev/null", &e.path])
             .output()
@@ -463,6 +475,26 @@ pub fn commit(dir: &Path, msg: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use crate::testutil::TempRepo;
+
+    #[test]
+    fn unmerged_codes_are_one_conflict_entry() {
+        let entries = parse_entries("UU a\0AA b\0DU c\0M  d\0".split('\0'));
+        let got: Vec<(Sec, char, &str)> = entries.iter().map(|e| (e.sec, e.code, e.path.as_str())).collect();
+        assert_eq!(
+            got,
+            [(Sec::Conflict, 'U', "a"), (Sec::Conflict, 'U', "b"), (Sec::Conflict, 'U', "c"), (Sec::Staged, 'M', "d")]
+        );
+    }
+
+    #[test]
+    fn finds_conflict_markers() {
+        let t = TempRepo::new("conflict-markers");
+        t.write("x", "a\n<<<<<<< HEAD\nb\n");
+        assert!(has_conflict_markers(&t.dir, "x"));
+        t.write("y", "a <<<<<<< b\n");
+        assert!(!has_conflict_markers(&t.dir, "y"));
+        assert!(!has_conflict_markers(&t.dir, "missing"));
+    }
 
     #[test]
     fn entries_by_section() {

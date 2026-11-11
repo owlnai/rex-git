@@ -442,6 +442,10 @@ impl App {
         let result = match e.sec {
             Sec::Staged => git(&self.dir, &["restore", "--staged", "--", &e.path])
                 .or_else(|_| git(&self.dir, &["rm", "--cached", "--quiet", "--", &e.path])),
+            // Staging a conflicted file tells git it's resolved.
+            Sec::Conflict if git::has_conflict_markers(&self.dir, &e.path) => {
+                Err(format!("{} still has conflict markers", e.path))
+            }
             _ => git(&self.dir, &["add", "--", &e.path]),
         };
         if let Err(err) = result {
@@ -455,6 +459,28 @@ impl App {
         }
     }
 
+    /// A conflicted file that still has its markers, which staging would hide.
+    fn unresolved(&self) -> Option<String> {
+        let conflicts = self.repo.entries.iter().filter(|e| e.sec == Sec::Conflict);
+        conflicts.map(|e| &e.path).find(|p| git::has_conflict_markers(&self.dir, p)).cloned()
+    }
+
+    /// Stage everything, unless that would mark an unresolved conflict as
+    /// resolved. Says whether it staged.
+    fn stage_all(&mut self) -> bool {
+        if let Some(path) = self.unresolved() {
+            self.flash(format!("{path} still has conflict markers"), true);
+            return false;
+        }
+        let result = git(&self.dir, &["add", "-A"]);
+        let staged = result.is_ok();
+        if let Err(err) = result {
+            self.flash(err, true);
+        }
+        self.refresh();
+        staged
+    }
+
     /// Stage the files the agents changed in their latest turn.
     fn stage_turn(&mut self) {
         let Some(info) = self.axel.as_ref() else {
@@ -465,7 +491,7 @@ impl App {
             .repo
             .entries
             .iter()
-            .filter(|e| e.sec != Sec::Staged && axel::mentions(&info.last_turn, &e.path))
+            .filter(|e| !matches!(e.sec, Sec::Staged | Sec::Conflict) && axel::mentions(&info.last_turn, &e.path))
             .map(|e| e.path.clone())
             .collect();
         if paths.is_empty() {
@@ -609,10 +635,7 @@ impl App {
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('d') => self.open_diff(self.sel),
             KeyCode::Char(' ') | KeyCode::Char('s') => self.toggle(self.sel),
             KeyCode::Char('a') => {
-                if let Err(err) = git(&self.dir, &["add", "-A"]) {
-                    self.flash(err, true);
-                }
-                self.refresh();
+                self.stage_all();
             }
             KeyCode::Char('u') => {
                 let r =
@@ -656,12 +679,9 @@ impl App {
             self.confirm_stage = false;
             match k.code {
                 KeyCode::Enter => {
-                    if let Err(err) = git(&self.dir, &["add", "-A"]) {
-                        self.flash(err, true);
-                        return;
+                    if self.stage_all() {
+                        self.commit();
                     }
-                    self.refresh();
-                    self.commit();
                 }
                 KeyCode::Char('s') => {
                     self.mode = Mode::Files;
@@ -1074,7 +1094,7 @@ impl App {
     fn draw_list(&mut self, f: &mut Frame, area: Rect) {
         let entries = &self.repo.entries;
         let mut rows: Vec<Row> = Vec::new();
-        for sec in [Sec::Staged, Sec::Changed, Sec::Untracked] {
+        for sec in [Sec::Conflict, Sec::Staged, Sec::Changed, Sec::Untracked] {
             let idx: Vec<usize> = (0..entries.len()).filter(|&i| entries[i].sec == sec).collect();
             if idx.is_empty() {
                 continue;
@@ -1301,7 +1321,14 @@ impl App {
         let r = &self.repo;
         let mut keys = Vec::new();
         if let Some(e) = r.entries.get(self.sel) {
-            keys.push(("spc", if e.sec == Sec::Staged { "unstage" } else { "stage" }));
+            keys.push((
+                "spc",
+                match e.sec {
+                    Sec::Staged => "unstage",
+                    Sec::Conflict => "resolved",
+                    _ => "stage",
+                },
+            ));
         }
         if r.staged() > 0 {
             keys.push(("c", "commit"));
@@ -1466,6 +1493,7 @@ impl App {
         let Some(d) = self.diff.as_mut() else { return };
 
         let tag = match d.entry.sec {
+            Sec::Conflict => fg("conflict", RED),
             Sec::Staged => fg("staged", GREEN),
             Sec::Changed => gray("unstaged"),
             Sec::Untracked => accent("new"),
@@ -1908,6 +1936,53 @@ fn main() -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::testutil::TempRepo;
+
+    /// A repository stopped in a merge with one conflicted file, `f`.
+    fn conflicted(name: &str) -> TempRepo {
+        let t = TempRepo::new(name);
+        t.write("f", "a\nb\nc\n");
+        t.commit_all("base");
+        t.git(&["checkout", "-q", "-b", "other"]);
+        t.write("f", "a\nX\nc\n");
+        t.commit_all("other");
+        t.git(&["checkout", "-q", "main"]);
+        t.write("f", "a\nY\nc\n");
+        t.commit_all("main");
+        t.git_may_fail(&["merge", "other"]);
+        t
+    }
+
+    #[test]
+    fn a_conflict_is_listed_once_and_shows_its_diff() {
+        let t = conflicted("conflict-listed-once");
+        let mut app = App::new(t.dir.clone(), None);
+        assert_eq!(app.repo.entries.len(), 1);
+        assert_eq!(app.repo.entries[0].sec, Sec::Conflict);
+        app.open_diff(0);
+        // <<<<<<<, Y, =======, X and >>>>>>> are new in the result.
+        assert_eq!(app.diff.as_ref().unwrap().parsed.adds, 5);
+    }
+
+    #[test]
+    fn space_keeps_a_conflict_until_its_markers_are_gone() {
+        let t = conflicted("conflict-space");
+        let mut app = App::new(t.dir.clone(), None);
+        app.toggle(0);
+        assert!(!t.git(&["ls-files", "-u"]).is_empty(), "the conflict must still be in the index");
+        assert!(app.flash.as_ref().is_some_and(|f| f.1));
+        t.write("f", "a\nZ\nc\n");
+        app.toggle(0);
+        assert_eq!(t.git(&["ls-files", "-u"]), "");
+        assert_eq!(t.git(&["status", "--porcelain"]), "M  f\n");
+    }
+
+    #[test]
+    fn stage_all_refuses_while_markers_remain() {
+        let t = conflicted("conflict-stage-all");
+        let mut app = App::new(t.dir.clone(), None);
+        app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(!t.git(&["ls-files", "-u"]).is_empty());
+    }
 
     #[test]
     fn stage_in_a_diff_never_hits_another_file() {

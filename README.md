@@ -55,7 +55,9 @@ publishes a new branch, or fetches, pulls `--ff-only` and pushes.
 
 Files are grouped as staged, changed and untracked, with the lines each one adds and
 removes. `Space` or a click on `●` stages and unstages, `a` and `u` stage and unstage
-everything. Below them are the last three commits, the older ones fading out.
+everything. Files a merge or rebase left in conflict come first, under `conflicts`;
+`Space` marks one resolved once its `<<<<<<<` markers are gone. Below them are the last
+three commits, the older ones fading out.
 
 The bottom line shows the keys that fit what you're doing, and clicking one presses it.
 
