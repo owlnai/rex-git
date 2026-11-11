@@ -81,30 +81,7 @@ impl Repo {
         if let Some(head) = toks.next().and_then(|h| h.strip_prefix("## ")) {
             repo.parse_head(head, dir);
         }
-        while let Some(tok) = toks.next() {
-            if tok.len() < 4 {
-                continue;
-            }
-            let mut chars = tok.chars();
-            let (x, y) = (chars.next().unwrap(), chars.next().unwrap());
-            let path = tok[3..].to_string();
-            if x == 'R' || x == 'C' {
-                toks.next(); // the original path of a rename or copy
-            }
-            match (x, y) {
-                ('?', _) => repo.entries.push(Entry { sec: Sec::Untracked, code: '?', path }),
-                ('!', _) => {}
-                _ => {
-                    if x != ' ' {
-                        repo.entries.push(Entry { sec: Sec::Staged, code: x, path: path.clone() });
-                    }
-                    if y != ' ' {
-                        repo.entries.push(Entry { sec: Sec::Changed, code: y, path });
-                    }
-                }
-            }
-        }
-        repo.entries.sort_by_key(|e| e.sec);
+        repo.entries = parse_entries(toks);
         repo.load_counts(dir);
         repo.worktrees = worktrees(dir);
         if let Ok(log) = git(dir, &["log", "-5", "--format=%h%x1f%s%x1f%cr"]) {
@@ -181,6 +158,36 @@ impl Repo {
     }
 }
 
+/// The entries in `git status --porcelain=v1 -z` records, staged first.
+fn parse_entries<'a>(mut toks: impl Iterator<Item = &'a str>) -> Vec<Entry> {
+    let mut entries = Vec::new();
+    while let Some(tok) = toks.next() {
+        if tok.len() < 4 {
+            continue;
+        }
+        let mut chars = tok.chars();
+        let (x, y) = (chars.next().unwrap(), chars.next().unwrap());
+        let path = tok[3..].to_string();
+        if x == 'R' || x == 'C' {
+            toks.next(); // the original path of a rename or copy
+        }
+        match (x, y) {
+            ('?', _) => entries.push(Entry { sec: Sec::Untracked, code: '?', path }),
+            ('!', _) => {}
+            _ => {
+                if x != ' ' {
+                    entries.push(Entry { sec: Sec::Staged, code: x, path: path.clone() });
+                }
+                if y != ' ' {
+                    entries.push(Entry { sec: Sec::Changed, code: y, path });
+                }
+            }
+        }
+    }
+    entries.sort_by_key(|e| e.sec);
+    entries
+}
+
 /// One checkout of the repo: the main one or a linked worktree.
 pub struct Worktree {
     pub path: PathBuf,
@@ -203,7 +210,10 @@ pub fn changed_count(dir: &Path) -> Option<usize> {
 
 /// The repo's checkouts as `git worktree list` gives them, the main one first.
 pub fn worktrees(dir: &Path) -> Vec<Worktree> {
-    let Ok(out) = git(dir, &["worktree", "list", "--porcelain"]) else { return Vec::new() };
+    git(dir, &["worktree", "list", "--porcelain"]).map(|out| parse_worktrees(&out)).unwrap_or_default()
+}
+
+fn parse_worktrees(out: &str) -> Vec<Worktree> {
     out.split("\n\n")
         .filter_map(|block| {
             let mut wt = Worktree { path: PathBuf::new(), branch: String::new(), bare: false };
@@ -304,9 +314,11 @@ pub fn graph(dir: &Path, all: bool) -> Result<Vec<GraphRow>, String> {
     if all {
         args.push("--all");
     }
-    let out = git(dir, &args)?;
-    Ok(out
-        .lines()
+    Ok(parse_graph(&git(dir, &args)?))
+}
+
+fn parse_graph(out: &str) -> Vec<GraphRow> {
+    out.lines()
         .map(|l| {
             let mut p = l.split('\x1f');
             let lanes = p.next().unwrap_or("").trim_end().to_string();
@@ -321,7 +333,7 @@ pub fn graph(dir: &Path, all: bool) -> Result<Vec<GraphRow>, String> {
             };
             GraphRow { lanes, commit }
         })
-        .collect())
+        .collect()
 }
 
 pub fn draft_message(dir: &Path, start: &str, intent: &str) -> Result<String, String> {
