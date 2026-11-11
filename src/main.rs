@@ -111,6 +111,8 @@ struct App {
     diff: Option<DiffView>,
     context: usize,
     msg: String,
+    /// Enter was pressed with nothing staged: ask whether to stage everything.
+    confirm_stage: bool,
     flash: Option<(String, bool, Instant)>,
     drafting: Option<Instant>,
     syncing: Option<(&'static str, Instant)>,
@@ -147,6 +149,7 @@ impl App {
             diff: None,
             context: 0,
             msg: String::new(),
+            confirm_stage: false,
             flash: None,
             drafting: None,
             syncing: None,
@@ -314,7 +317,11 @@ impl App {
             return;
         }
         if self.repo.staged() == 0 {
-            self.flash("nothing staged: space stages a file, a stages all", true);
+            if self.repo.entries.is_empty() {
+                self.flash("nothing to commit", true);
+            } else {
+                self.confirm_stage = true;
+            }
             return;
         }
         if self.syncing.is_some() {
@@ -433,6 +440,7 @@ impl App {
 
     fn enter_commit(&mut self) {
         self.mode = Mode::Commit;
+        self.confirm_stage = false;
         // Pre-draft a message when there's something staged and nothing written.
         if self.msg.is_empty() && self.repo.staged() > 0 {
             self.draft();
@@ -444,6 +452,25 @@ impl App {
         let newline = k.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
         // The draft replaces the message when it arrives, so don't let typing get lost.
         if self.drafting.is_some() && k.code != KeyCode::Esc {
+            return;
+        }
+        if self.confirm_stage {
+            self.confirm_stage = false;
+            match k.code {
+                KeyCode::Enter => {
+                    if let Err(err) = git(&self.dir, &["add", "-A"]) {
+                        self.flash(err, true);
+                        return;
+                    }
+                    self.refresh();
+                    self.commit();
+                }
+                KeyCode::Char('s') => {
+                    self.mode = Mode::Files;
+                    self.flash("space stages a file, then c ⏎ commits", false);
+                }
+                _ => {}
+            }
             return;
         }
         match k.code {
@@ -833,13 +860,25 @@ impl App {
     }
 
     fn draw_footer(&self, f: &mut Frame, area: Rect) {
-        let line = if let Some(line) = self.flash_line(area.width as usize) {
+        // The question comes before any flash, so Enter never answers it unseen.
+        let line = if self.mode == Mode::Commit && self.confirm_stage {
+            let all = format!("stage all {} & commit", self.unstaged_count());
+            let keys = hints(&[("⏎", &all), ("s", "pick"), ("esc", "cancel")], area.width as usize);
+            // A narrow pane keeps the choices and drops the label.
+            if keys.width() + 17 > area.width as usize {
+                keys
+            } else {
+                let mut spans = vec![fg("nothing staged", RED), gray(" · ")];
+                spans.extend(keys.spans);
+                Line::from(spans)
+            }
+        } else if let Some(line) = self.flash_line(area.width as usize) {
             line
         } else if self.mode == Mode::Commit {
             let staged = self.repo.staged();
             let mut keys = vec![("Enter", "commit"), ("⇧Enter", "new line"), ("Tab", "draft")];
             if staged == 0 {
-                keys[0] = ("", "nothing staged");
+                keys[0] = ("Enter", "stage all & commit");
             }
             hints(&keys, area.width as usize)
         } else {
@@ -851,6 +890,13 @@ impl App {
             hints(&keys, area.width as usize)
         };
         f.render_widget(line, area);
+    }
+
+    /// Files that `git add -A` would stage.
+    fn unstaged_count(&self) -> usize {
+        let mut paths: Vec<&str> = self.repo.entries.iter().filter(|e| e.sec != Sec::Staged).map(|e| e.path.as_str()).collect();
+        paths.dedup();
+        paths.len()
     }
 
     fn flash_line(&self, width: usize) -> Option<Line<'static>> {
