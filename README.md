@@ -1,10 +1,9 @@
 # rex-git
 
-A git side pane for [Rex](https://www.superlogical.com/rex), styled after
-[Axel](https://axel.md). It shows the branch and how far it is from its upstream, the
-changed files, and recent commits. You can read diffs, stage files, write a commit
-message (or have Claude draft it), commit, push and pull, all from a narrow pane next
-to your work.
+A git side pane for the terminal, styled after [Axel](https://axel.md). It shows the
+branch and how far it is from its upstream, the changed files, and recent commits. You
+can read diffs, stage files, write a commit message (or have Claude draft it), commit,
+push and pull, all from a narrow pane next to your work.
 
 <p>
   <img src="docs/files.png" width="260" alt="The file list: staged, changed and untracked files with line counts">
@@ -12,8 +11,9 @@ to your work.
   <img src="docs/commit.png" width="260" alt="A commit message being written in the commit box">
 </p>
 
-With Axel, it also opens by itself in every thread window, on that thread's workspace,
-and marks the files the thread's agents changed.
+rex-git is a standalone program that works in any terminal, next to tmux, in a split of
+your terminal app, or on its own. In [Rex](https://www.superlogical.com/rex) and Axel it
+does more: see [Integrations](#integrations).
 
 ## Install
 
@@ -31,14 +31,12 @@ curl -LsSf https://github.com/owlnai/rex-git/releases/latest/download/rex-git-in
 
 Or from source, with [Rust](https://rustup.rs): `cargo install --git https://github.com/owlnai/rex-git`.
 
-Open it next to the pane you're in:
+Run `rex-git [DIR]` in any terminal. It opens on `DIR`, or on the current directory.
+Press `?` inside for every key. In Rex, open it next to the pane you're in:
 
 ```sh
 rex split --split=right --ratio 30 --label git --focus=false -- rex-git
 ```
-
-`rex-git [DIR]` opens on `DIR`, or on the current directory. Press `?` inside for every
-key.
 
 **Drafting commit messages** uses the [Claude Code](https://claude.com/claude-code) CLI,
 `claude`, with Haiku. Without it, everything else works.
@@ -81,8 +79,8 @@ the pane to fill its window. `Esc` goes back, and puts the layout back if you zo
 
 `c` opens the commit box, which takes the list's place while you write, with the staged
 count and the subject's length on its border (yellow past 50, red past 72). `Enter`
-commits, `Shift+Enter` adds a line, `Ctrl+E` opens the message in `$EDITOR`, and `↑`
-`↓` and the wheel scroll a long message. Pasting a message keeps its lines instead of
+commits, `Shift+Enter` adds a line, `Ctrl+E` opens the message in `$EDITOR`, and `↑` `↓`
+and the wheel scroll a long message. Pasting a message keeps its lines instead of
 committing at the first one.
 
 `Tab` asks Claude to draft the message, or to finish the one you started, keeping your
@@ -137,9 +135,15 @@ Press `?` inside for this list.
 | `!` | Show the last error in full |
 | `q` | Quit |
 
-## In Rex
+## Integrations
 
-rex-git works in any terminal, and in Rex it also:
+Everything above works in any terminal, with nothing else installed. When rex-git
+finds itself in Rex, or in an Axel thread, it does more.
+
+### Rex
+
+[Rex](https://www.superlogical.com/rex) is a terminal multiplexer: tabs, each with
+panes you split and drag around. In a Rex pane, rex-git:
 
 - **Follows your shell.** When a shell in the same Rex window `cd`s into another repo
   or worktree, rex-git switches to it. It waits while you write a message, and stays put
@@ -156,9 +160,10 @@ rex-git works in any terminal, and in Rex it also:
 - **Titles its pane** with the branch and how far it is from its upstream, like
   `git · main ↑2`.
 
-## With Axel
+### Axel
 
-[Axel](https://axel.md) runs coding agents in Rex, one window per thread. rex-git adds:
+[Axel](https://axel.md) runs coding agents in Rex, one window per thread. On top of the
+Rex features, rex-git adds:
 
 - **A pane in every thread window.** The watcher in [`axel/`](axel) opens rex-git beside
   the conversation in each new Axel thread window whose workspace is a git repository,
