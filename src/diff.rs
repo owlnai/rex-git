@@ -22,7 +22,10 @@ pub struct DLine {
 #[derive(Debug)]
 pub enum Item {
     /// Unchanged lines left out between hunks, and the function they're in.
-    Gap { hidden: u32, context: String },
+    Gap {
+        hidden: u32,
+        context: String,
+    },
     Line(DLine),
     Note(String),
 }
@@ -36,11 +39,7 @@ pub struct Parsed {
 
 impl Parsed {
     pub fn max_num(&self) -> u32 {
-        self.items
-            .iter()
-            .filter_map(|i| if let Item::Line(l) = i { Some(l.num) } else { None })
-            .max()
-            .unwrap_or(0)
+        self.items.iter().filter_map(|i| if let Item::Line(l) = i { Some(l.num) } else { None }).max().unwrap_or(0)
     }
 }
 
@@ -57,7 +56,8 @@ pub fn parse(text: &str) -> Parsed {
     if !text.lines().any(|l| l.starts_with("@@")) {
         // Binary files, mode changes, empty files: show what git said.
         for l in text.lines() {
-            if l.starts_with("diff --git") || l.starts_with("index ") || l.starts_with("--- ") || l.starts_with("+++ ") {
+            if l.starts_with("diff --git") || l.starts_with("index ") || l.starts_with("--- ") || l.starts_with("+++ ")
+            {
                 continue;
             }
             out.items.push(Item::Note(l.to_string()));

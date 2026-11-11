@@ -130,7 +130,16 @@ pub fn watch(mut dir: PathBuf, mut wanted: Option<String>, tx: Sender<Option<Inf
                             // A turn's checkpoints don't change once it's over, except the newest.
                             if !cache.contains_key(&key) || Some(&key) == newest.as_ref() {
                                 let n = ordinal.to_string();
-                                let stat = axel(&["thread", "diff", &info.thread_id, "--session", session, "--turn", &n, "--stat"]);
+                                let stat = axel(&[
+                                    "thread",
+                                    "diff",
+                                    &info.thread_id,
+                                    "--session",
+                                    session,
+                                    "--turn",
+                                    &n,
+                                    "--stat",
+                                ]);
                                 cache.insert(key.clone(), stat.unwrap_or_default());
                             }
                             info.all_turns.push_str(&cache[&key]);
@@ -148,7 +157,9 @@ pub fn watch(mut dir: PathBuf, mut wanted: Option<String>, tx: Sender<Option<Inf
                 }
                 info
             });
-            let key = info.as_ref().map(|i| (i.thread_id.clone(), i.all_turns.clone(), i.last_turn.clone() + &i.agents.join(",")));
+            let key = info
+                .as_ref()
+                .map(|i| (i.thread_id.clone(), i.all_turns.clone(), i.last_turn.clone() + &i.agents.join(",")));
             if key != last_sent {
                 last_sent = key;
                 if tx.send(info).is_err() {

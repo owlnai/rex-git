@@ -25,8 +25,8 @@ use ratatui::{
     DefaultTerminal, Frame,
     crossterm::{
         event::{
-            self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-            KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+            self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+            MouseButton, MouseEvent, MouseEventKind,
         },
         execute,
         terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -580,7 +580,8 @@ impl App {
                 self.refresh();
             }
             KeyCode::Char('u') => {
-                let r = git(&self.dir, &["reset", "-q"]).or_else(|_| git(&self.dir, &["rm", "-r", "--cached", "-q", "."]));
+                let r =
+                    git(&self.dir, &["reset", "-q"]).or_else(|_| git(&self.dir, &["rm", "-r", "--cached", "-q", "."]));
                 if let Err(err) = r {
                     self.flash(err, true);
                 }
@@ -829,7 +830,9 @@ impl App {
                     g.scroll = g.scroll.saturating_sub(3);
                 }
             }
-            (Mode::Commit, MouseEventKind::ScrollDown) => (self.msg_scroll, self.msg_follow) = (self.msg_scroll + 3, false),
+            (Mode::Commit, MouseEventKind::ScrollDown) => {
+                (self.msg_scroll, self.msg_follow) = (self.msg_scroll + 3, false)
+            }
             (Mode::Commit, MouseEventKind::ScrollUp) => {
                 (self.msg_scroll, self.msg_follow) = (self.msg_scroll.saturating_sub(3), false);
             }
@@ -1160,10 +1163,9 @@ impl App {
                 0 => "nothing staged".to_string(),
                 n => format!("{n} staged"),
             };
-            block = block
-                .border_style(Style::new().fg(ACCENT))
-                .title(Line::from(accent(" commit message ")))
-                .title(Line::from(vec![gray(format!(" {staged} · ")), fg(format!("{subject} "), color)]).right_aligned());
+            block = block.border_style(Style::new().fg(ACCENT)).title(Line::from(accent(" commit message "))).title(
+                Line::from(vec![gray(format!(" {staged} · ")), fg(format!("{subject} "), color)]).right_aligned(),
+            );
         }
         let body = block.inner(area);
         f.render_widget(block, area);
@@ -1173,7 +1175,8 @@ impl App {
             let what = if self.msg.is_empty() { "drafting with claude…" } else { "completing with claude…" };
             vec![Line::from(vec![accent(format!("{} ", self.spinner(since))), gray(what)])]
         } else if self.msg.is_empty() {
-            let hint = if active { "write a message, or Tab to draft one" } else { "c to commit · Tab drafts a message" };
+            let hint =
+                if active { "write a message, or Tab to draft one" } else { "c to commit · Tab drafts a message" };
             let mut line = Vec::new();
             if active {
                 line.push(accent("▏"));
@@ -1313,7 +1316,8 @@ impl App {
 
     /// Files that `git add -A` would stage.
     fn unstaged_count(&self) -> usize {
-        let mut paths: Vec<&str> = self.repo.entries.iter().filter(|e| e.sec != Sec::Staged).map(|e| e.path.as_str()).collect();
+        let mut paths: Vec<&str> =
+            self.repo.entries.iter().filter(|e| e.sec != Sec::Staged).map(|e| e.path.as_str()).collect();
         paths.dedup();
         paths.len()
     }
@@ -1346,7 +1350,10 @@ impl App {
         let h = (rows as u16 + 2).min(area.height);
         let rect = Rect { x: area.x, y: area.y + area.height.saturating_sub(h) / 2, width: area.width, height: h };
         f.render_widget(Clear, rect);
-        let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(RED)).padding(Padding::horizontal(1));
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(RED))
+            .padding(Padding::horizontal(1));
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);
     }
 
@@ -1388,13 +1395,9 @@ impl App {
     }
 
     fn draw_diff(&mut self, f: &mut Frame, area: Rect) {
-        let [header, _, body, footer] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .areas(area);
+        let [header, _, body, footer] =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
+                .areas(area);
         self.diff_header_y = header.y;
         self.diff_page = body.height.saturating_sub(2) as usize;
         let flash = self.flash_line(footer.width as usize);
@@ -1446,13 +1449,9 @@ impl App {
     }
 
     fn draw_graph(&mut self, f: &mut Frame, area: Rect) {
-        let [header, _, body, footer] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .areas(area);
+        let [header, _, body, footer] =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
+                .areas(area);
         self.diff_header_y = header.y;
         self.diff_page = body.height.saturating_sub(2) as usize;
         let flash = self.flash_line(footer.width as usize);
@@ -1470,13 +1469,8 @@ impl App {
 
         g.scroll = g.scroll.min(g.rows.len().saturating_sub(1));
         let width = body.width as usize;
-        let visible: Vec<Line> = g
-            .rows
-            .iter()
-            .skip(g.scroll)
-            .take(body.height as usize)
-            .map(|r| graph_line(r, width))
-            .collect();
+        let visible: Vec<Line> =
+            g.rows.iter().skip(g.scroll).take(body.height as usize).map(|r| graph_line(r, width)).collect();
         f.render_widget(Paragraph::new(visible), body);
 
         let other = if g.all { "this branch" } else { "all branches" };
@@ -1490,13 +1484,9 @@ impl App {
 impl App {
     /// The repo's checkouts: folder, branch, and how many files each changed.
     fn draw_worktrees(&mut self, f: &mut Frame, area: Rect) {
-        let [header, _, body, footer] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .areas(area);
+        let [header, _, body, footer] =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
+                .areas(area);
         self.diff_header_y = header.y;
         self.click_rows.clear();
         let flash = self.flash_line(footer.width as usize);
@@ -1600,7 +1590,8 @@ fn render_diff(p: &Parsed, width: usize) -> Vec<Line<'static>> {
         match item {
             Item::Note(text) => rows.push(Line::from(gray(format!("{:gw$}  {text}", "")))),
             Item::Gap { hidden, context } => {
-                let lines = if *hidden == 1 { "1 unchanged line".to_string() } else { format!("{hidden} unchanged lines") };
+                let lines =
+                    if *hidden == 1 { "1 unchanged line".to_string() } else { format!("{hidden} unchanged lines") };
                 let mut text = format!("{:>gw$}  ⋯ {lines}", "");
                 if !context.is_empty() {
                     text.push_str(" · ");

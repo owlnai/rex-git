@@ -13,11 +13,7 @@ const MAX_DIFF_FOR_PROMPT: usize = 60_000;
 
 pub fn git_cmd(dir: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
-    cmd.args(args)
-        .current_dir(dir)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(Stdio::null());
+    cmd.args(args).current_dir(dir).env("GIT_TERMINAL_PROMPT", "0").env("GIT_OPTIONAL_LOCKS", "0").stdin(Stdio::null());
     // The pane owns the terminal, so a password prompt would wreck the screen.
     if env::var_os("GIT_SSH_COMMAND").is_none() {
         cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
@@ -353,18 +349,13 @@ pub fn draft_message(dir: &Path, start: &str, intent: &str) -> Result<String, St
          only when the change needs explaining, and keep it to what the change does and why.\n",
     );
     if !intent.trim().is_empty() {
-        prompt.push_str(&format!(
-            "The change was made for this task, which tells you why: {}\n",
-            intent.trim()
-        ));
+        prompt.push_str(&format!("The change was made for this task, which tells you why: {}\n", intent.trim()));
     }
     if !recent.trim().is_empty() {
         prompt.push_str(&format!("Match the style of these recent subjects:\n{recent}"));
     }
     if !start.trim().is_empty() {
-        prompt.push_str(&format!(
-            "The author has started the message. Keep their words and complete it:\n{start}\n"
-        ));
+        prompt.push_str(&format!("The author has started the message. Keep their words and complete it:\n{start}\n"));
     }
     prompt.push_str("Output only the commit message: no code fences, no quotes, no commentary.");
 
