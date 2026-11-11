@@ -72,7 +72,8 @@ headers, every line has its number, and the lines left out between changes show 
 
 `n` and `N` move between files, `s` stages, and `e` shows more context (3, 10 or 30
 lines, as the hint says). They act on the file on screen, and the diff reloads when that
-file changes. `Esc` goes back.
+file changes. In Rex, `z` zooms the pane to fill its window. `Esc` goes back, and puts
+the layout back if you zoomed.
 
 ### Committing
 
@@ -122,6 +123,7 @@ Press `?` inside for this list.
 |---|---|
 | `↑` `↓` `j` `k` | Move |
 | `Enter`, click | Show the file's diff |
+| `z` | Zoom the pane to fill the window, in a diff or the graph (in Rex) |
 | `Space`, click `●` | Stage or unstage the file, or mark a conflict resolved |
 | `a` / `u` | Stage everything / unstage everything |
 | `c` | Write the commit message (drafted for you when something is staged) |
@@ -133,6 +135,15 @@ Press `?` inside for this list.
 | `t` | Stage the files from the agents' latest turn (with Axel) |
 | `!` | Show the last error in full |
 | `q` | Quit |
+
+## In Rex
+
+rex-git works in any terminal, and in Rex it also:
+
+- **Zooms for diffs.** `z` gives a diff or the graph the whole window, and leaving it, or
+  quitting, puts the layout back.
+- **Titles its pane** with the branch and how far it is from its upstream, like
+  `git · main ↑2`.
 
 ## With Axel
 
@@ -174,7 +185,6 @@ back to the latest turn only.
   push that needs a password fails with a message instead of taking over the pane. Your
   own `core.sshCommand`, `GIT_SSH_COMMAND` or `GIT_SSH` is kept. Signed commits work when
   your GPG pinentry is a GUI one, such as `pinentry-mac`.
-- The pane keeps its Rex title up to date, for example `git · main ↑2`.
 - Set `REX_GIT_DEBUG=/path/to/log` to log every input event, which helps when a key
   doesn't do what you expect.
 
