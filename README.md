@@ -9,7 +9,7 @@ to your work.
 <p>
   <img src="docs/files.png" width="300" alt="The file list: staged, changed and untracked files with line counts">
   <img src="docs/diff.png" width="300" alt="A diff with line numbers, green and red line backgrounds, and the edited words highlighted">
-  <img src="docs/commit.png" width="300" alt="A commit message drafted by Claude in the commit box">
+  <img src="docs/commit.png" width="300" alt="A commit message being written in the commit box">
 </p>
 
 With Axel, it also opens by itself in every thread window, on that thread's workspace,
@@ -43,7 +43,76 @@ key.
 **Drafting commit messages** uses the [Claude Code](https://claude.com/claude-code) CLI,
 `claude`, with Haiku. Without it, everything else works.
 
+## A tour
+
+### Files
+
+<img src="docs/files.png" width="360" alt="The file list: staged, changed and untracked files with line counts, recent commits fading out, and the commit box">
+
+The header has the folder and branch, how far the branch is from its upstream, and
+when it last fetched. Click the sync state (`↑3 to push`, `✓ synced`…) to sync: it
+publishes a new branch, or fetches, pulls `--ff-only` and pushes.
+
+Files are grouped as staged, changed and untracked, with the lines each one adds and
+removes. `Space` or a click on `●` stages and unstages, `a` and `u` stage and unstage
+everything. Below them are the last three commits, the older ones fading out.
+
+The bottom line shows the keys that fit what you're doing, and clicking one presses it.
+
+### Diffs
+
+<img src="docs/diff.png" width="360" alt="A diff with line numbers, green and red line backgrounds, and the edited words highlighted">
+
+`Enter` or a click opens a file's diff. Added lines are on green, removed lines on red,
+and within an edited line the words that changed are brighter. Instead of `@@` hunk
+headers, every line has its number, and the lines left out between changes show as
+`⋯ 3 unchanged lines · fn f26()`, with the function they're in when git can tell.
+
+`n` and `N` move between files, `s` stages, and `e` shows more context (3, 10 or 30
+lines, as the hint says). `Esc` goes back.
+
+### Committing
+
+<img src="docs/commit.png" width="360" alt="A commit message being written in the commit box, with the staged count and subject length on its border">
+
+`c` opens the commit box, which takes the list's place while you write, with the staged
+count and the subject's length on its border (yellow past 50, red past 72). `Enter`
+commits, `Shift+Enter` adds a line, `Ctrl+E` opens the message in `$EDITOR`, and `↑`
+`↓` and the wheel scroll a long message.
+
+`Tab` asks Claude to draft the message, or to finish the one you started, keeping your
+words. When something is staged and the box is empty, `c` drafts one for you. With
+nothing staged, `Enter` asks first: `Enter` again stages everything and commits, `s`
+goes back to pick files.
+
+### Commit graph
+
+<img src="docs/graph.png" width="360" alt="The commit graph with colored lanes, a merged branch, branch and tag names, and commit ages">
+
+`g` shows the current branch's history with its lanes, branches and tags. `a` switches
+to every branch and tag, `r` refreshes, and `Esc` or `g` goes back.
+
+### Worktrees
+
+<img src="docs/worktrees.png" width="360" alt="The worktree list: each checkout's folder, branch, and how many files it changed">
+
+In a linked worktree, the header says which repo it belongs to (`worktree of work`).
+`w` lists every checkout of the repo with its branch and how many files it changed, and
+`Enter` or a click switches rex-git to it. A message you were writing waits in its
+worktree until you come back.
+
+### Errors
+
+<img src="docs/error.png" width="360" alt="A failed push's full git error in a box over the file list">
+
+Messages like `pushed 2 commits` fade after a few seconds. An error stays in place of
+the keys until your next key or click, and shows git's `fatal:` line rather than its
+closing advice. When there's more to it, `! more` says so, and `!` shows the last error
+in full. The fetch every 3 minutes fails quietly, as when you're offline.
+
 ## Keys
+
+Press `?` inside for this list.
 
 | Key | |
 |---|---|
@@ -54,31 +123,12 @@ key.
 | `c` | Write the commit message (drafted for you when something is staged) |
 | `Tab` | Draft a commit message with Claude |
 | `g` | Show the commit graph |
+| `w` | Switch to another worktree |
 | Click `✓ synced`, `↑2 to push`… | Sync: publish the branch, or fetch, pull `--ff-only` and push |
 | `p` / `P` / `f` | Push / pull `--ff-only` / fetch (it also fetches every 3 minutes) |
 | `t` | Stage the files from the agents' latest turn (with Axel) |
+| `!` | Show the last error in full |
 | `q` | Quit |
-
-The commit box sits under the file list. While you write, it takes the list's place, with
-the subject's length on its border; `↑` `↓` and the wheel scroll a long message. `Enter`
-commits, `Shift+Enter` adds a line, `Ctrl+E` opens the message in `$EDITOR`, and `Tab`
-asks Claude to draft the message, or to finish the one you started, keeping your words. With nothing
-staged, `Enter` asks first: `Enter` again stages everything and commits, `s` goes back
-to pick files.
-
-The bottom line shows the keys that fit what you're doing, and clicking one presses it.
-
-The commit graph shows the current branch, and `a` switches to every branch and tag. `Esc` or
-`g` goes back.
-
-In a diff, `n` and `N` move between files, `s` stages, `e` shows more context, and `Esc` goes back.
-
-## Diffs
-
-Added lines are on green, removed lines on red, and within an edited line the words that
-changed are brighter. Instead of `@@` hunk headers, every line has its number, and the
-lines left out between changes show as `⋯ 17 unchanged lines · fn parse()`, with the
-function they're in when git can tell.
 
 ## With Axel
 
