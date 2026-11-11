@@ -225,10 +225,10 @@ impl App {
     fn refresh(&mut self) {
         let keep = self.repo.entries.get(self.sel).cloned();
         self.repo = Repo::load(&self.dir);
-        if let Some(keep) = keep {
-            if let Some(i) = self.repo.entries.iter().position(|e| *e == keep) {
-                self.sel = i;
-            }
+        if let Some(keep) = keep
+            && let Some(i) = self.repo.entries.iter().position(|e| *e == keep)
+        {
+            self.sel = i;
         }
         self.sel = self.sel.min(self.repo.entries.len().saturating_sub(1));
         self.last_refresh = Instant::now();
@@ -1776,10 +1776,10 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         let wait = if app.drafting.is_some() || app.syncing.is_some() { 80 } else { 250 };
         if event::poll(Duration::from_millis(wait))? {
             let ev = event::read()?;
-            if let Some(path) = env::var_os("REX_GIT_DEBUG") {
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-                    let _ = writeln!(f, "{ev:?}");
-                }
+            if let Some(path) = env::var_os("REX_GIT_DEBUG")
+                && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path)
+            {
+                let _ = writeln!(f, "{ev:?}");
             }
             match ev {
                 Event::Key(k) if k.kind == KeyEventKind::Press => app.on_key(k),

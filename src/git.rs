@@ -108,7 +108,7 @@ impl Repo {
                 }
             }
         }
-        repo.entries.sort_by(|a, b| a.sec.cmp(&b.sec));
+        repo.entries.sort_by_key(|e| e.sec);
         repo.load_counts(dir);
         repo.worktrees = worktrees(dir);
         if let Ok(log) = git(dir, &["log", "-5", "--format=%h%x1f%s%x1f%cr"]) {
@@ -139,12 +139,13 @@ impl Repo {
         }
         // Untracked files count as all added.
         for e in self.entries.iter().filter(|e| e.sec == Sec::Untracked) {
-            if let Ok(bytes) = std::fs::read(dir.join(&e.path)) {
-                if bytes.len() < 2_000_000 && !bytes.contains(&0) {
-                    let lines = bytes.iter().filter(|&&b| b == b'\n').count() as u32
-                        + (!bytes.is_empty() && !bytes.ends_with(b"\n")) as u32;
-                    self.counts.insert((Sec::Untracked, e.path.clone()), (lines, 0));
-                }
+            if let Ok(bytes) = std::fs::read(dir.join(&e.path))
+                && bytes.len() < 2_000_000
+                && !bytes.contains(&0)
+            {
+                let lines = bytes.iter().filter(|&&b| b == b'\n').count() as u32
+                    + (!bytes.is_empty() && !bytes.ends_with(b"\n")) as u32;
+                self.counts.insert((Sec::Untracked, e.path.clone()), (lines, 0));
             }
         }
     }
