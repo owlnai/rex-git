@@ -17,7 +17,7 @@ use std::{
     collections::HashMap,
     env,
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     sync::mpsc,
     thread,
@@ -93,7 +93,21 @@ enum Mode {
 
 enum Job {
     Drafted(Result<String, String>),
-    Synced { what: &'static str, quiet: bool, result: Result<String, String> },
+    Synced {
+        what: &'static str,
+        quiet: bool,
+        result: Result<String, String>,
+    },
+    /// The message came back from the editor in its Rex pane.
+    Edited(Result<String, String>),
+    /// The editor opened on a file in its Rex pane or tab has exited.
+    Opened(Result<(), String>),
+}
+
+/// What the run loop hands the terminal to $EDITOR for, outside Rex.
+enum Editing {
+    Message,
+    File(PathBuf, Option<u32>),
 }
 
 struct DiffView {
@@ -145,8 +159,10 @@ struct App {
     msg_scroll: usize,
     msg_follow: bool,
     msg_page: usize,
-    /// Ctrl+E asked for $EDITOR, which the run loop opens.
-    edit: bool,
+    /// $EDITOR to open in this pane, which the run loop does, outside Rex.
+    edit: Option<Editing>,
+    /// The message is open in $EDITOR in a Rex pane since then.
+    editing: Option<Instant>,
     /// This pane is zoomed to fill its Rex window, for a diff or the graph.
     zoomed: bool,
     /// The footer message, whether it's an error, and whether it stays until
@@ -204,7 +220,8 @@ impl App {
             msg_scroll: 0,
             msg_follow: true,
             msg_page: 8,
-            edit: false,
+            edit: None,
+            editing: None,
             zoomed: false,
             flash: None,
             last_error: None,
@@ -326,6 +343,23 @@ impl App {
                     }
                     self.refresh();
                 }
+                Job::Edited(result) => {
+                    self.editing = None;
+                    match result {
+                        Ok(text) => {
+                            self.msg = text;
+                            self.mode = Mode::Commit;
+                            (self.msg_scroll, self.msg_follow) = (0, false);
+                        }
+                        Err(err) => self.flash(err, true),
+                    }
+                }
+                Job::Opened(result) => {
+                    if let Err(err) = result {
+                        self.flash(err, true);
+                    }
+                    self.refresh();
+                }
             }
         }
         while let Ok(info) = self.axel_rx.try_recv() {
@@ -376,6 +410,11 @@ impl App {
         };
         rex::zoom(&block, on);
         self.zoomed = on;
+    }
+
+    /// Whether something is running that a switch to another checkout would lose.
+    fn busy(&self) -> bool {
+        self.syncing.is_some() || self.drafting.is_some() || self.editing.is_some()
     }
 
     fn sync(&mut self, what: &'static str, quiet: bool) {
@@ -542,6 +581,61 @@ impl App {
         self.flash(format!("{path} changed since this diff was opened"), false);
     }
 
+    /// Open the file in the list or the diff in $EDITOR at its first change:
+    /// in a Rex pane beside this one or a tab of its own, or else in this pane.
+    fn open_file(&mut self, place: rex::Place) {
+        let (entry, line) = match (self.mode, self.diff.as_ref()) {
+            (Mode::Diff, Some(d)) => (d.entry.clone(), first_change(&d.parsed)),
+            _ => {
+                let Some(e) = self.repo.entries.get(self.sel).cloned() else { return };
+                let line = first_change(&diff::parse(&git::diff_text(&self.dir, &e, CONTEXTS[0])));
+                (e, line)
+            }
+        };
+        let path = self.dir.join(&entry.path);
+        if !path.is_file() {
+            self.flash(format!("{} isn't a file to open", entry.path), true);
+            return;
+        }
+        let Some(block) = rex::block() else {
+            self.edit = Some(Editing::File(path, line));
+            return;
+        };
+        let label = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let command = editor_command(&editor(), &path, line);
+        let (dir, tx) = (self.dir.clone(), self.tx.clone());
+        thread::spawn(move || {
+            let _ = tx.send(Job::Opened(rex::run_editor(&block, place, &label, &dir, &command)));
+        });
+    }
+
+    /// Edit the message in $EDITOR: in a Rex pane beside this one, so rex-git
+    /// stays on screen, or else in this pane.
+    fn edit_message(&mut self) {
+        let Some(block) = rex::block() else {
+            self.edit = Some(Editing::Message);
+            return;
+        };
+        if self.editing.is_some() {
+            return;
+        }
+        let path = message_path();
+        if let Err(err) = std::fs::write(&path, &self.msg) {
+            self.flash(format!("{}: {err}", path.display()), true);
+            return;
+        }
+        self.editing = Some(Instant::now());
+        let command = editor_command(&editor(), &path, None);
+        let (dir, tx) = (self.dir.clone(), self.tx.clone());
+        thread::spawn(move || {
+            let result = rex::run_editor(&block, rex::Place::Pane, "commit message", &dir, &command)
+                .and_then(|()| std::fs::read_to_string(&path).map_err(|e| e.to_string()))
+                .map(|text| text.trim_end().to_string());
+            let _ = std::fs::remove_file(&path);
+            let _ = tx.send(Job::Edited(result));
+        });
+    }
+
     fn open_graph(&mut self, all: bool) {
         match git::graph(&self.dir, all) {
             Ok(rows) => {
@@ -579,7 +673,7 @@ impl App {
             self.mode = Mode::Files;
             return;
         }
-        if self.syncing.is_some() || self.drafting.is_some() {
+        if self.busy() {
             self.flash("busy, one moment", true);
             return;
         }
@@ -644,6 +738,8 @@ impl App {
             KeyCode::Home => self.sel = 0,
             KeyCode::End | KeyCode::Char('G') => self.sel = n.saturating_sub(1),
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('d') => self.open_diff(self.sel),
+            KeyCode::Char('o') => self.open_file(rex::Place::Pane),
+            KeyCode::Char('O') => self.open_file(rex::Place::Tab),
             KeyCode::Char(' ') | KeyCode::Char('s') => self.toggle(self.sel),
             KeyCode::Char('a') => {
                 self.stage_all();
@@ -682,8 +778,9 @@ impl App {
     fn on_commit_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let newline = k.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
-        // The draft replaces the message when it arrives, so don't let typing get lost.
-        if self.drafting.is_some() && k.code != KeyCode::Esc {
+        // The draft or the edited message replaces the message when it
+        // arrives, so don't let typing get lost.
+        if (self.drafting.is_some() || self.editing.is_some()) && k.code != KeyCode::Esc {
             return;
         }
         if self.confirm_stage {
@@ -706,7 +803,7 @@ impl App {
         match k.code {
             KeyCode::Esc => self.mode = Mode::Files,
             KeyCode::Tab => self.draft(),
-            KeyCode::Char('e') if ctrl => self.edit = true,
+            KeyCode::Char('e') if ctrl => self.edit_message(),
             KeyCode::Up => (self.msg_scroll, self.msg_follow) = (self.msg_scroll.saturating_sub(1), false),
             KeyCode::Down => (self.msg_scroll, self.msg_follow) = (self.msg_scroll + 1, false),
             KeyCode::PageUp => (self.msg_scroll, self.msg_follow) = (self.msg_scroll.saturating_sub(page), false),
@@ -739,7 +836,7 @@ impl App {
 
     /// Pasted text goes into the message as it is, so its newlines don't commit.
     fn on_paste(&mut self, text: &str) {
-        if self.mode != Mode::Commit || self.drafting.is_some() || self.confirm_stage {
+        if self.mode != Mode::Commit || self.drafting.is_some() || self.editing.is_some() || self.confirm_stage {
             return;
         }
         self.dismiss_error();
@@ -763,6 +860,8 @@ impl App {
             KeyCode::Home => d.scroll = 0,
             KeyCode::End | KeyCode::Char('G') => d.scroll = max,
             KeyCode::Char('z') => self.set_zoom(!self.zoomed),
+            KeyCode::Char('o') => self.open_file(rex::Place::Pane),
+            KeyCode::Char('O') => self.open_file(rex::Place::Tab),
             KeyCode::Char('e') => {
                 let scroll = d.scroll;
                 self.context = (self.context + 1) % CONTEXTS.len();
@@ -1265,7 +1364,12 @@ impl App {
         f.render_widget(block, area);
         let width = body.width as usize;
 
-        let text: Vec<Line> = if let Some(since) = self.drafting {
+        let text: Vec<Line> = if let Some(since) = self.editing {
+            vec![Line::from(clip(
+                vec![accent(format!("{} ", self.spinner(since))), gray("editing in $EDITOR…")],
+                width,
+            ))]
+        } else if let Some(since) = self.drafting {
             let what = if self.msg.is_empty() { "drafting with claude…" } else { "completing with claude…" };
             vec![Line::from(vec![accent(format!("{} ", self.spinner(since))), gray(what)])]
         } else if self.msg.is_empty() {
@@ -1357,6 +1461,7 @@ impl App {
         }
         if !r.entries.is_empty() {
             keys.push(("⏎", "diff"));
+            keys.push(("o", "open"));
             keys.push(("Tab", "draft"));
         }
         if self.axel.is_some() {
@@ -1462,6 +1567,7 @@ impl App {
         let rows: &[(&str, &str)] = &[
             ("↑↓ j k", "move"),
             ("⏎ click", "show the diff"),
+            ("o  O", "open in $EDITOR, in a pane / tab"),
             ("spc  ●", "stage / unstage"),
             ("a  u", "stage all / unstage all"),
             ("t", "stage the agents' last turn"),
@@ -1550,7 +1656,7 @@ impl App {
                 if rex::block().is_some() {
                     keys.push(("z", if self.zoomed { "unzoom" } else { "zoom" }));
                 }
-                keys.extend([("s", "stage"), ("n", "next file"), ("e", context.as_str())]);
+                keys.extend([("s", "stage"), ("n", "next file"), ("o", "open"), ("e", context.as_str())]);
                 self.put_hints(f, footer, vec![], &keys, None);
             }
         }
@@ -1879,7 +1985,8 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     while !app.quit {
         app.tick();
         term.draw(|f| app.draw(f))?;
-        let wait = if app.drafting.is_some() || app.syncing.is_some() { 80 } else { 250 };
+        let busy = app.drafting.is_some() || app.syncing.is_some() || app.editing.is_some();
+        let wait = if busy { 80 } else { 250 };
         if event::poll(Duration::from_millis(wait))? {
             let ev = event::read()?;
             if let Some(path) = env::var_os("REX_GIT_DEBUG")
@@ -1894,9 +2001,8 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                 _ => {}
             }
         }
-        if app.edit {
-            app.edit = false;
-            edit_message(term, app)?;
+        if let Some(what) = app.edit.take() {
+            edit_in_pane(term, app, what)?;
         }
     }
     if app.zoomed {
@@ -1905,28 +2011,87 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     Ok(())
 }
 
-/// Hand the terminal to $VISUAL or $EDITOR to edit the message, then take it back.
-fn edit_message(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
-    let path = env::temp_dir().join(format!("rex-git-{}.txt", std::process::id()));
-    std::fs::write(&path, &app.msg)?;
-    let editor = env::var("VISUAL").or_else(|_| env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
+/// Hand the terminal to $VISUAL or $EDITOR to edit the message or a file,
+/// then take it back.
+fn edit_in_pane(term: &mut DefaultTerminal, app: &mut App, what: Editing) -> io::Result<()> {
+    let (path, line) = match what {
+        Editing::Message => {
+            let path = message_path();
+            std::fs::write(&path, &app.msg)?;
+            (path, None)
+        }
+        Editing::File(ref path, line) => (path.clone(), line),
+    };
+    let editor = editor();
     execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen)?;
     disable_raw_mode()?;
-    // Through sh, so an editor with arguments like `code -w` works.
-    let status = Command::new("sh").args(["-c", &format!("{editor} \"$1\""), "sh"]).arg(&path).status();
+    let status = Command::new("sh").args(["-c", &editor_command(&editor, &path, line)]).status();
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     term.clear()?;
     match status {
         Ok(s) if s.success() => {
-            app.msg = std::fs::read_to_string(&path)?.trim_end().to_string();
-            (app.msg_scroll, app.msg_follow) = (0, false);
+            if let Editing::Message = what {
+                app.msg = std::fs::read_to_string(&path)?.trim_end().to_string();
+                (app.msg_scroll, app.msg_follow) = (0, false);
+            }
         }
         Ok(s) => app.flash(format!("{editor} exited with {s}"), true),
         Err(err) => app.flash(format!("{editor}: {err}"), true),
     }
-    let _ = std::fs::remove_file(&path);
+    if let Editing::Message = what {
+        let _ = std::fs::remove_file(&path);
+    }
+    app.refresh();
     Ok(())
+}
+
+fn editor() -> String {
+    env::var("VISUAL").or_else(|_| env::var("EDITOR")).unwrap_or_else(|_| "vi".into())
+}
+
+/// Where the message waits while $EDITOR has it.
+fn message_path() -> PathBuf {
+    env::temp_dir().join(format!("rex-git-{}.txt", std::process::id()))
+}
+
+/// The command line, for sh, that opens `path` in `editor` at `line`, for
+/// the editors that take one. `editor` may have arguments, like `code -w`.
+fn editor_command(editor: &str, path: &Path, line: Option<u32>) -> String {
+    let path = path.display();
+    let name = editor.split_whitespace().next().unwrap_or("");
+    let name = name.rsplit('/').next().unwrap_or(name);
+    match line {
+        Some(n) if matches!(name, "vi" | "vim" | "nvim" | "nano" | "emacs" | "kak" | "micro" | "mg") => {
+            format!("{editor} +{n} {}", quote(&path.to_string()))
+        }
+        Some(n) if matches!(name, "hx" | "helix" | "zed") => format!("{editor} {}", quote(&format!("{path}:{n}"))),
+        Some(n) if matches!(name, "code" | "cursor" | "windsurf") => {
+            format!("{editor} -g {}", quote(&format!("{path}:{n}")))
+        }
+        _ => format!("{editor} {}", quote(&path.to_string())),
+    }
+}
+
+/// `s` quoted for sh.
+fn quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// The line in the new file where a diff's first change is.
+fn first_change(p: &Parsed) -> Option<u32> {
+    let mut after = 0;
+    for item in &p.items {
+        if let Item::Line(l) = item {
+            match l.kind {
+                Kind::Add => return Some(l.num),
+                // A removed line's number is in the old file; open where it was.
+                Kind::Del => return Some(after + 1),
+                Kind::Ctx => after = l.num,
+            }
+        }
+    }
+    None
 }
 
 fn main() -> io::Result<()> {
@@ -2061,6 +2226,28 @@ mod tests {
         assert_eq!(t.git(&["diff", "--cached", "--name-only"]), "b.txt\n");
         assert!(app.mode == Mode::Diff);
         assert_eq!(app.diff.as_ref().unwrap().entry.sec, Sec::Staged);
+    }
+
+    #[test]
+    fn editor_commands() {
+        let p = Path::new("/r/it's.rs");
+        assert_eq!(editor_command("nvim", p, Some(3)), r"nvim +3 '/r/it'\''s.rs'");
+        assert_eq!(editor_command("/usr/bin/vim", Path::new("/a"), Some(3)), "/usr/bin/vim +3 '/a'");
+        assert_eq!(editor_command("hx", Path::new("/a"), Some(3)), "hx '/a:3'");
+        assert_eq!(editor_command("code -w", Path::new("/a"), Some(3)), "code -w -g '/a:3'");
+        assert_eq!(editor_command("ed", Path::new("/a"), Some(3)), "ed '/a'");
+        assert_eq!(editor_command("nvim", Path::new("/a"), None), "nvim '/a'");
+    }
+
+    #[test]
+    fn first_changes() {
+        let p = diff::parse("@@ -10,3 +10,4 @@\n ctx\n+new\n ctx2\n");
+        assert_eq!(first_change(&p), Some(11));
+        let p = diff::parse("@@ -10,3 +10,2 @@\n ctx\n-gone\n ctx2\n");
+        assert_eq!(first_change(&p), Some(11));
+        let p = diff::parse("@@ -1,2 +1,1 @@\n-gone\n ctx\n");
+        assert_eq!(first_change(&p), Some(1));
+        assert_eq!(first_change(&diff::parse("Binary files differ\n")), None);
     }
 
     #[test]
