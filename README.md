@@ -52,7 +52,7 @@ key.
 | `Space`, click `●` | Stage or unstage the file |
 | `a` / `u` | Stage everything / unstage everything |
 | `c` | Write the commit message (drafted for you when something is staged) |
-| `g` | Draft a commit message with Claude |
+| `Tab` | Draft a commit message with Claude |
 | `p` / `P` / `f` | Push / pull `--ff-only` / fetch (it also fetches every 3 minutes) |
 | `t` | Stage the files from the agents' latest turn (with Axel) |
 | `q` | Quit |
