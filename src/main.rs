@@ -860,6 +860,9 @@ impl App {
         self.sync_rect = Rect { x: right.right().saturating_sub(sync_w), width: sync_w, ..right };
 
         let mut parts = Vec::new();
+        if let Some(main) = r.main_worktree(&self.dir) {
+            parts.push(format!("worktree of {main}"));
+        }
         match &r.upstream {
             None => parts.push("not published yet".to_string()),
             Some(up) => {
@@ -868,7 +871,7 @@ impl App {
                 }
                 if let Some(t) = self.fetched {
                     parts.push(format!("fetched {}", ago(t.elapsed())));
-                } else if parts.is_empty() {
+                } else if !parts.iter().any(|p| p.starts_with('→')) {
                     parts.push(format!("→ {up}"));
                 }
             }

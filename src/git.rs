@@ -1,10 +1,10 @@
-//! Git: status, numstat, diffs, commits, and drafting commit messages.
+//! Git: status, numstat, diffs, commits, worktrees, and drafting commit messages.
 
 use std::{
     collections::HashMap,
     env,
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
 };
@@ -71,6 +71,8 @@ pub struct Repo {
     /// Lines added and removed, per section and path. Binary files are absent.
     pub counts: HashMap<(Sec, String), (u32, u32)>,
     pub commits: Vec<(String, String, String)>,
+    /// Every checkout of the repo, the main one first.
+    pub worktrees: Vec<Worktree>,
 }
 
 impl Repo {
@@ -108,6 +110,7 @@ impl Repo {
         }
         repo.entries.sort_by(|a, b| a.sec.cmp(&b.sec));
         repo.load_counts(dir);
+        repo.worktrees = worktrees(dir);
         if let Ok(log) = git(dir, &["log", "-5", "--format=%h%x1f%s%x1f%cr"]) {
             repo.commits = log
                 .lines()
@@ -173,6 +176,51 @@ impl Repo {
     pub fn staged(&self) -> usize {
         self.entries.iter().filter(|e| e.sec == Sec::Staged).count()
     }
+
+    /// The main checkout's folder name when `dir` is a linked worktree.
+    pub fn main_worktree(&self, dir: &Path) -> Option<String> {
+        let main = self.worktrees.first()?;
+        (main.path != dir).then(|| main.name())
+    }
+}
+
+/// One checkout of the repo: the main one or a linked worktree.
+pub struct Worktree {
+    pub path: PathBuf,
+    /// The branch checked out, or the short hash when detached.
+    pub branch: String,
+    /// A bare repo has nothing checked out, so there's nothing to switch to.
+    pub bare: bool,
+}
+
+impl Worktree {
+    pub fn name(&self) -> String {
+        self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    }
+}
+
+/// The repo's checkouts as `git worktree list` gives them, the main one first.
+pub fn worktrees(dir: &Path) -> Vec<Worktree> {
+    let Ok(out) = git(dir, &["worktree", "list", "--porcelain"]) else { return Vec::new() };
+    out.split("\n\n")
+        .filter_map(|block| {
+            let mut wt = Worktree { path: PathBuf::new(), branch: String::new(), bare: false };
+            for line in block.lines() {
+                if let Some(path) = line.strip_prefix("worktree ") {
+                    // Compare like the canonical dir rex-git runs in.
+                    let path = PathBuf::from(path);
+                    wt.path = path.canonicalize().unwrap_or(path);
+                } else if let Some(head) = line.strip_prefix("HEAD ") {
+                    wt.branch = head.chars().take(7).collect();
+                } else if let Some(branch) = line.strip_prefix("branch ") {
+                    wt.branch = branch.trim_start_matches("refs/heads/").to_string();
+                } else if line == "bare" {
+                    wt.bare = true;
+                }
+            }
+            (!wt.path.as_os_str().is_empty()).then_some(wt)
+        })
+        .collect()
 }
 
 pub fn short_age(s: &str) -> String {
