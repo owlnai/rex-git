@@ -31,7 +31,7 @@ use ratatui::{
         terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
     layout::{Constraint, Layout, Margin, Rect},
-    style::{Color, Style, Stylize},
+    style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
 };
@@ -1003,15 +1003,22 @@ impl App {
             return;
         }
         let mut lines = vec![Line::raw(""), Line::from(accent("recent").bold())];
-        for (h, s, when) in self.repo.commits.iter().take(area.height as usize - 2) {
+        for (i, (h, s, when)) in self.repo.commits.iter().take(area.height as usize - 2).enumerate() {
             let room = (area.width as usize).saturating_sub(h.len() + when.len() + 3);
-            lines.push(Line::from(vec![
+            // Older commits fade out, like the end of a list.
+            let fade = match i {
+                0 => Style::new(),
+                1 => Style::new().add_modifier(Modifier::DIM),
+                _ => Style::new().fg(GRAY).add_modifier(Modifier::DIM),
+            };
+            let line = Line::from(vec![
                 gray(h.clone()),
                 " ".into(),
                 truncate_end(s, room).into(),
                 " ".into(),
                 gray(when.clone()),
-            ]));
+            ]);
+            lines.push(line.patch_style(fade));
         }
         f.render_widget(Paragraph::new(lines), area);
     }
