@@ -9,6 +9,7 @@
 mod axel;
 mod diff;
 mod git;
+mod rex;
 #[cfg(test)]
 mod testutil;
 
@@ -17,7 +18,7 @@ use std::{
     env,
     io::{self, Write},
     path::PathBuf,
-    process::{Command, Stdio},
+    process::Command,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -146,6 +147,8 @@ struct App {
     msg_page: usize,
     /// Ctrl+E asked for $EDITOR, which the run loop opens.
     edit: bool,
+    /// This pane is zoomed to fill its Rex window, for a diff or the graph.
+    zoomed: bool,
     /// The footer message, whether it's an error, and whether it stays until
     /// the next key or click instead of fading after `FLASH`.
     flash: Option<(String, bool, bool, Instant)>,
@@ -202,6 +205,7 @@ impl App {
             msg_follow: true,
             msg_page: 8,
             edit: false,
+            zoomed: false,
             flash: None,
             last_error: None,
             show_error: false,
@@ -327,6 +331,10 @@ impl App {
         while let Ok(info) = self.axel_rx.try_recv() {
             self.axel = info;
         }
+        // The pane zooms for a diff or the graph, and goes back with them.
+        if self.zoomed && !matches!(self.mode, Mode::Diff | Mode::Graph) {
+            self.set_zoom(false);
+        }
         if self.last_refresh.elapsed() >= REFRESH {
             self.refresh();
         }
@@ -342,7 +350,7 @@ impl App {
 
     /// Keep the Rex pane's title showing the branch and its sync state.
     fn update_title(&mut self) {
-        let Ok(block) = env::var("REX_BLOCK") else { return };
+        let Some(block) = rex::block() else { return };
         if !self.repo.is_repo {
             return;
         }
@@ -357,14 +365,17 @@ impl App {
             return;
         }
         self.title = title.clone();
-        thread::spawn(move || {
-            let mut cmd = Command::new("rex");
-            cmd.args(["block", "rename"]);
-            if let Ok(session) = env::var("REX_SESSION") {
-                cmd.args(["-s", &session]);
-            }
-            let _ = cmd.args([&block, &title]).stdout(Stdio::null()).stderr(Stdio::null()).status();
-        });
+        rex::rename(&block, &title);
+    }
+
+    /// Zoom the pane to fill its Rex window, or put the layout back.
+    fn set_zoom(&mut self, on: bool) {
+        let Some(block) = rex::block() else {
+            self.flash("zoom works in a Rex pane", true);
+            return;
+        };
+        rex::zoom(&block, on);
+        self.zoomed = on;
     }
 
     fn sync(&mut self, what: &'static str, quiet: bool) {
@@ -751,6 +762,7 @@ impl App {
             KeyCode::PageUp | KeyCode::Char('b') => d.scroll = d.scroll.saturating_sub(page),
             KeyCode::Home => d.scroll = 0,
             KeyCode::End | KeyCode::Char('G') => d.scroll = max,
+            KeyCode::Char('z') => self.set_zoom(!self.zoomed),
             KeyCode::Char('e') => {
                 let scroll = d.scroll;
                 self.context = (self.context + 1) % CONTEXTS.len();
@@ -834,6 +846,7 @@ impl App {
             KeyCode::PageUp | KeyCode::Char('b') => g.scroll = g.scroll.saturating_sub(page),
             KeyCode::Home => g.scroll = 0,
             KeyCode::End | KeyCode::Char('G') => g.scroll = max,
+            KeyCode::Char('z') => self.set_zoom(!self.zoomed),
             KeyCode::Char('a') => {
                 let all = !g.all;
                 self.open_graph(all);
@@ -1469,6 +1482,7 @@ impl App {
             ("n  N", "next / previous file"),
             ("s", "stage / unstage the file"),
             ("e", "more context"),
+            ("z", "zoom the pane (in Rex)"),
             ("esc", "back"),
             ("", ""),
             ("in the graph", ""),
@@ -1531,7 +1545,12 @@ impl App {
             None => {
                 // The context hint carries its line count, so `e` needs no message.
                 let context = format!("context {}", CONTEXTS[self.context]);
-                let keys = [("esc", "back"), ("s", "stage"), ("n", "next file"), ("e", context.as_str())];
+                let mut keys = vec![("esc", "back")];
+                // Zoom comes early, since a narrow pane is what it's for.
+                if rex::block().is_some() {
+                    keys.push(("z", if self.zoomed { "unzoom" } else { "zoom" }));
+                }
+                keys.extend([("s", "stage"), ("n", "next file"), ("e", context.as_str())]);
                 self.put_hints(f, footer, vec![], &keys, None);
             }
         }
@@ -1565,7 +1584,14 @@ impl App {
         let other = if g.all { "this branch" } else { "all branches" };
         match flash {
             Some(line) => f.render_widget(line, footer),
-            None => self.put_hints(f, footer, vec![], &[("esc", "back"), ("a", other), ("r", "refresh")], None),
+            None => {
+                let mut keys = vec![("esc", "back")];
+                if rex::block().is_some() {
+                    keys.push(("z", if self.zoomed { "unzoom" } else { "zoom" }));
+                }
+                keys.extend([("a", other), ("r", "refresh")]);
+                self.put_hints(f, footer, vec![], &keys, None);
+            }
         }
     }
 }
@@ -1872,6 +1898,9 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
             app.edit = false;
             edit_message(term, app)?;
         }
+    }
+    if app.zoomed {
+        app.set_zoom(false);
     }
     Ok(())
 }
