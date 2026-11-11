@@ -1438,7 +1438,7 @@ impl App {
             Some(line) => f.render_widget(line, footer),
             None => {
                 // The context hint carries its line count, so `e` needs no message.
-                let context = format!("{} lines context", CONTEXTS[self.context]);
+                let context = format!("context {}", CONTEXTS[self.context]);
                 let keys = [("esc", "back"), ("s", "stage"), ("n", "next file"), ("e", context.as_str())];
                 self.put_hints(f, footer, vec![], &keys, None);
             }
