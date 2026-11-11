@@ -72,8 +72,8 @@ headers, every line has its number, and the lines left out between changes show 
 
 `n` and `N` move between files, `s` stages, and `e` shows more context (3, 10 or 30
 lines, as the hint says). They act on the file on screen, and the diff reloads when that
-file changes. In Rex, `z` zooms the pane to fill its window. `Esc` goes back, and puts
-the layout back if you zoomed.
+file changes. `o` opens the file in `$EDITOR` at its first change, and in Rex, `z` zooms
+the pane to fill its window. `Esc` goes back, and puts the layout back if you zoomed.
 
 ### Committing
 
@@ -123,6 +123,7 @@ Press `?` inside for this list.
 |---|---|
 | `↑` `↓` `j` `k` | Move |
 | `Enter`, click | Show the file's diff |
+| `o` / `O` | Open the file in `$EDITOR` at its first change, in a pane / a new tab (in Rex) |
 | `z` | Zoom the pane to fill the window, in a diff or the graph (in Rex) |
 | `Space`, click `●` | Stage or unstage the file, or mark a conflict resolved |
 | `a` / `u` | Stage everything / unstage everything |
@@ -140,6 +141,12 @@ Press `?` inside for this list.
 
 rex-git works in any terminal, and in Rex it also:
 
+- **Opens your editor beside it.** `o` and `Ctrl+E` open `$EDITOR` in a new pane next to
+  the biggest pane in the window, instead of taking over rex-git's narrow one, and `O`
+  opens it in a new tab. Drag the pane wherever you like; when the editor exits, it
+  closes and you're back in rex-git. The file opens at its first change in vim, Neovim,
+  nano, Emacs, Helix, VS Code and others that take a line. Elsewhere, both keys open
+  the editor in rex-git's own pane.
 - **Zooms for diffs.** `z` gives a diff or the graph the whole window, and leaving it, or
   quitting, puts the layout back.
 - **Titles its pane** with the branch and how far it is from its upstream, like
